@@ -1,6 +1,7 @@
 """Business-logic layer for the calendar app."""
 
 from .calendar_model import CalendarModel
+from .events import Event, Events
 from .journal import Journal
 from .lunation import (
     Lunation,
@@ -20,6 +21,8 @@ from .daylight import (
 
 __all__ = [
     "CalendarModel",
+    "Event",
+    "Events",
     "Journal",
     "Lunation",
     "moon_phase",

@@ -38,6 +38,8 @@ from PySide6.QtWidgets import (
 from model import (
     CalendarModel,
     Daylight,
+    Event,
+    Events,
     Journal,
     Lunation,
     current_location,
@@ -99,6 +101,17 @@ def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
 # Moon-phase glyph geometry (top-right corner of a tile).
 _MOON_RADIUS = 4.5
 
+# Event canvas geometry (the tile-body box that holds event glyphs).
+_CANVAS_TOP = 30.0      # below the number / moon header
+_CANVAS_MARGIN = 4.0    # gap from the tile's right / bottom edges
+_CANVAS_PAD = 3.0       # padding so the box doesn't touch other elements
+_EVENT_GLYPH_SIZE = 14.0
+# Canvas-border hover timing.
+_CANVAS_HOVER_DELAY_MS = 150
+_CANVAS_FADE_MS = 180
+# Placeholder glyph for a newly created event (symbol picking comes later).
+_DEFAULT_EVENT_GLYPH = "○"
+
 
 def _moon_lit_path(cx: float, cy: float, r: float,
                    illumination: float, waxing: bool) -> QPainterPath:
@@ -151,8 +164,10 @@ class DayCell(QPushButton):
     # Emitted when the daylight bar's hover state changes, so the parent can
     # draw a row-wide reference line at the hovered bar's dawn level.
     daylight_hover_changed = Signal()
-    # Emitted on double-click, to expand this day to fill the month view.
+    # Emitted on left double-click, to expand this day to fill the month view.
     double_clicked = Signal()
+    # Emitted on right double-click within the canvas, to create an event.
+    event_create_requested = Signal()
     # Emitted (standalone/expanded tile only) when the day number is clicked.
     collapse_requested = Signal()
     # Emitted (expanded tile) when the journal corner is clicked (toggle).
@@ -196,6 +211,19 @@ class DayCell(QPushButton):
         # planet-retrograde-station marks: (planet glyph, arrow) pairs.
         self._station_marks: list[tuple[str, str]] = []
         self._daylight: Daylight | None = None
+        # Event canvas: a borderless box in the tile body holding event
+        # glyphs; its border fades in (after a delay) while hovered.
+        self._canvas_over = False        # mouse currently over the canvas
+        self._canvas_progress = 0.0      # border fade amount (0..1)
+        self._canvas_timer = QTimer(self)
+        self._canvas_timer.setSingleShot(True)
+        self._canvas_timer.setInterval(_CANVAS_HOVER_DELAY_MS)
+        self._canvas_timer.timeout.connect(self._on_canvas_timer)
+        self._canvas_anim = QVariantAnimation(self)
+        self._canvas_anim.setDuration(_CANVAS_FADE_MS)
+        self._canvas_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._canvas_anim.valueChanged.connect(self._on_canvas_anim)
+        self._events: list[str] = []            # one glyph per event
         # Seamless grid: every cell draws its left + bottom edge, so a tile's
         # bottom coincides with the horizontal gridline. Row 0 / the last
         # column add the outer top / right edges.
@@ -218,6 +246,7 @@ class DayCell(QPushButton):
         station_marks: list[tuple[str, str]],
         daylight: Daylight | None,
         has_journal: bool,
+        events: list[str],
     ) -> None:
         self._date = day
         self._in_month = in_month
@@ -229,6 +258,7 @@ class DayCell(QPushButton):
         self._station_marks = station_marks
         self._daylight = daylight
         self._has_journal = has_journal
+        self._events = events
         self.update()
 
     def set_grid_edges(self, *, top: bool, right: bool) -> None:
@@ -248,6 +278,47 @@ class DayCell(QPushButton):
         y0 = self._daylight.dawn_fraction * h
         y1 = self._daylight.dusk_fraction * h
         return QRectF(_DAYLIGHT_X, y0, _DAYLIGHT_W * self._paint_scale(), y1 - y0)
+
+    def _canvas_rect(self) -> QRectF:
+        """The event-canvas box in the tile body (right of the daylight bar,
+        below the number/moon header)."""
+        s = self._paint_scale()
+        bar = _DAYLIGHT_W if self._show_daylight else 0.0
+        left = (bar + 5.0) * s
+        top = _CANVAS_TOP * s
+        m = _CANVAS_MARGIN * s
+        rect = QRectF(left, top, self.width() - left - m, self.height() - top - m)
+        pad = _CANVAS_PAD * s
+        return rect.adjusted(pad, pad, -pad, -pad)
+
+    def _set_canvas_over(self, over: bool) -> None:
+        """Track whether the cursor is over the canvas, with a delayed fade-in
+        and a fade-out."""
+        if over == self._canvas_over:
+            return
+        self._canvas_over = over
+        if over:
+            self._canvas_timer.start()  # wait before fading the border in
+        else:
+            self._canvas_timer.stop()
+            self._canvas_fade_to(0.0)
+
+    def _on_canvas_timer(self) -> None:
+        if self._canvas_over:
+            self._canvas_fade_to(1.0)
+
+    def _canvas_fade_to(self, end: float) -> None:
+        if self._canvas_progress == end \
+                and self._canvas_anim.state() != QVariantAnimation.Running:
+            return
+        self._canvas_anim.stop()
+        self._canvas_anim.setStartValue(self._canvas_progress)
+        self._canvas_anim.setEndValue(end)
+        self._canvas_anim.start()
+
+    def _on_canvas_anim(self, value: float) -> None:
+        self._canvas_progress = float(value)
+        self.update()
 
     def set_daylight_visible(self, visible: bool) -> None:
         if visible != self._show_daylight:
@@ -292,6 +363,7 @@ class DayCell(QPushButton):
             super().leaveEvent(event)
             return
         self._hover = False
+        self._set_canvas_over(False)
         if self._daylight_hover:
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
@@ -309,12 +381,14 @@ class DayCell(QPushButton):
                 self._journal_hover = over_journal
                 self.update()
             return
+        pos = event.position()
         rect = self._daylight_rect()
-        over = rect is not None and rect.contains(event.position())
+        over = rect is not None and rect.contains(pos)
         if over != self._daylight_hover:
             self._daylight_hover = over
             self.update()
             self.daylight_hover_changed.emit()
+        self._set_canvas_over(self._canvas_rect().contains(pos))
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event) -> None:
@@ -331,7 +405,11 @@ class DayCell(QPushButton):
 
     def mouseDoubleClickEvent(self, event) -> None:
         if not self._standalone and self._date is not None:
-            self.double_clicked.emit()
+            if event.button() == Qt.LeftButton:
+                self.double_clicked.emit()       # expand to day view
+            elif event.button() == Qt.RightButton \
+                    and self._canvas_rect().contains(event.position()):
+                self.event_create_requested.emit()  # add an event to the canvas
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:
@@ -454,6 +532,37 @@ class DayCell(QPushButton):
                                       lx, daylight_rect.bottom(), "bottom")
                 p.restore()
 
+        # --- Event canvas (grid tiles only): a borderless box in the tile body
+        # holding one glyph per event; a border appears while hovered. ---
+        if not self._standalone:
+            canvas = self._canvas_rect()
+            if self._canvas_progress > 0:
+                p.save()
+                p.setOpacity(self._canvas_progress)
+                cpen = QPen(QColor(t.TEXT_FAINT))
+                cpen.setWidthF(1.0)
+                p.setPen(cpen)
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(canvas)
+                p.restore()
+            if self._events:
+                gsize = _EVENT_GLYPH_SIZE * s
+                gap = 3.0 * s
+                font = QFont(self.font())
+                font.setPixelSize(max(1, round(gsize)))
+                p.setFont(font)
+                p.setPen(QColor(t.TEXT))
+                ex, ey = canvas.left() + gap, canvas.top() + gap
+                for glyph in self._events:
+                    if ex + gsize > canvas.right():
+                        ex = canvas.left() + gap
+                        ey += gsize + gap
+                    if ey + gsize > canvas.bottom():
+                        break  # no room for more glyphs
+                    p.drawText(QRectF(ex, ey, gsize, gsize),
+                               Qt.AlignCenter, glyph)
+                    ex += gsize + gap
+
         # --- Top-right glyph: the zodiac sign on a day the Moon enters a new
         # sign, otherwise the moon-phase shape (crescent/quarter/gibbous/full).
         full_alpha = 110 if not self._in_month else 255
@@ -554,11 +663,13 @@ class MonthView(QWidget):
     """The left-hand month calendar."""
 
     def __init__(self, model: CalendarModel, theme: ThemeManager,
-                 journal: Journal | None = None) -> None:
+                 journal: Journal | None = None,
+                 events: Events | None = None) -> None:
         super().__init__()
         self._model = model
         self._theme = theme
         self._journal = journal or Journal()
+        self._events = events or Events()
         # Planet ingresses / retrograde stations to mark (all on by default;
         # toggled via the View menu).
         self._enabled_planets: set[str] = {key for key, _, _ in PLANETS}
@@ -623,7 +734,9 @@ class MonthView(QWidget):
 
     # -- expanded day view -----------------------------------------------
     def _on_cell_double_clicked(self) -> None:
-        cell = self.sender()
+        self._expand_cell(self.sender())
+
+    def _expand_cell(self, cell: object) -> None:
         if not isinstance(cell, DayCell) or cell.date is None:
             return
         self._expanded.set_theme(self._theme.current)
@@ -763,9 +876,19 @@ class MonthView(QWidget):
                 cell.clicked.connect(self._on_cell_clicked)
                 cell.daylight_hover_changed.connect(self._on_daylight_hover)
                 cell.double_clicked.connect(self._on_cell_double_clicked)
+                cell.event_create_requested.connect(self._on_event_create)
                 grid.addWidget(cell, r, c)
                 self._cells.append(cell)
         return grid
+
+    def _on_event_create(self) -> None:
+        # Right double-click on a tile's canvas adds an event symbol, then
+        # opens the day view so its details can be edited.
+        cell = self.sender()
+        if isinstance(cell, DayCell) and cell.date is not None:
+            self._events.add(cell.date, Event(symbol=_DEFAULT_EVENT_GLYPH))
+            self._refresh()
+            self._expand_cell(cell)
 
     # -- daylight hover: delayed appearance + smooth fade --------------------
     def _on_daylight_hover(self) -> None:
@@ -1006,6 +1129,7 @@ class MonthView(QWidget):
                     station_marks=self._station_marks(day, location),
                     daylight=daylight(day),
                     has_journal=self._journal.has(day),
+                    events=self._events.symbols(day),
                 )
                 cell.set_grid_edges(top=(row == 0), right=(col == 6))
             else:

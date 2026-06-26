@@ -8,7 +8,13 @@ from PySide6.QtCore import QSettings
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QFileDialog, QFrame, QMainWindow, QVBoxLayout
 
-from model import CalendarModel, Journal, current_location, set_current_location
+from model import (
+    CalendarModel,
+    Events,
+    Journal,
+    current_location,
+    set_current_location,
+)
 from .theme import ThemeManager
 from .month_view import MonthView, PLANETS
 from .settings_dialog import LocationDialog
@@ -45,11 +51,19 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(720, 480)
 
         self._settings = QSettings("CalendarApp", "Calendar")
-        folder = self._settings.value("journal/folder", "", type=str)
-        self._journal = (
-            Journal(Path(folder) / "journal.json") if folder else Journal()
+        # One data folder holds journal.json + events.json. Fall back to the
+        # legacy journal-folder setting, then to the default location.
+        folder = (self._settings.value("data/folder", "", type=str)
+                  or self._settings.value("journal/folder", "", type=str))
+        if folder:
+            self._journal = Journal(Path(folder) / "journal.json")
+            self._events = Events(Path(folder) / "events.json")
+        else:
+            self._journal = Journal()
+            self._events = Events()
+        self._month_view = MonthView(
+            self._model, self._theme, self._journal, self._events
         )
-        self._month_view = MonthView(self._model, self._theme, self._journal)
         self.setCentralWidget(_Panel(self._month_view, self._theme))
 
         self._build_menu_bar()
@@ -63,24 +77,27 @@ class MainWindow(QMainWindow):
         settings_menu = self.menuBar().addMenu("Settings")
         location_action = settings_menu.addAction("Set current location…")
         location_action.triggered.connect(self._on_set_location)
-        journal_action = settings_menu.addAction("Set journal folder…")
-        journal_action.triggered.connect(self._on_set_journal_folder)
+        data_action = settings_menu.addAction("Set calendar data folder…")
+        data_action.triggered.connect(self._on_set_data_folder)
         settings_menu.addSeparator()
-        self._journal_folder_action = settings_menu.addAction("")
-        self._journal_folder_action.setEnabled(False)  # a non-clickable label
-        self._update_journal_folder_label()
+        self._data_folder_action = settings_menu.addAction("")
+        self._data_folder_action.setEnabled(False)  # a non-clickable label
+        self._update_data_folder_label()
 
-    def _update_journal_folder_label(self) -> None:
-        self._journal_folder_action.setText(f"Journal folder: {self._journal.folder()}")
+    def _update_data_folder_label(self) -> None:
+        self._data_folder_action.setText(
+            f"Calendar data folder: {self._journal.folder()}"
+        )
 
-    def _on_set_journal_folder(self) -> None:
+    def _on_set_data_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Journal Folder", str(self._journal.folder())
+            self, "Select Calendar Data Folder", str(self._journal.folder())
         )
         if folder:
             self._journal.set_folder(folder)
-            self._settings.setValue("journal/folder", folder)
-            self._update_journal_folder_label()
+            self._events.set_folder(folder)
+            self._settings.setValue("data/folder", folder)
+            self._update_data_folder_label()
             self._month_view.reload()
 
     def _on_set_location(self) -> None:

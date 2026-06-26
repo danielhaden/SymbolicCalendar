@@ -1,0 +1,6 @@
+# GUI framework (Qt for Python)
+PySide6>=6.9
+
+# Astrology/ephemeris data: moon phase, planet signs, retrograde state.
+# Pulls in pyswisseph, which is also used directly for civil-twilight times.
+kerykeion>=4.26

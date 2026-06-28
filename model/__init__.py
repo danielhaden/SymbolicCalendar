@@ -5,8 +5,13 @@ from .events import Event, Events
 from .journal import Journal
 from .lunation import (
     Lunation,
+    MoonAspect,
+    moon_aspects,
     moon_ingress,
+    moon_ingress_at,
     moon_phase,
+    moon_void_begins,
+    moon_void_of_course,
     planet_ingress,
     planet_station,
     venus_ingress,
@@ -14,8 +19,10 @@ from .lunation import (
 from .daylight import (
     Daylight,
     Location,
+    Moonlight,
     current_location,
     daylight,
+    moonlight,
     set_current_location,
 )
 
@@ -25,14 +32,21 @@ __all__ = [
     "Events",
     "Journal",
     "Lunation",
+    "MoonAspect",
+    "moon_aspects",
+    "moon_void_of_course",
+    "moon_void_begins",
     "moon_phase",
     "moon_ingress",
+    "moon_ingress_at",
     "venus_ingress",
     "planet_ingress",
     "planet_station",
     "Daylight",
     "Location",
+    "Moonlight",
     "daylight",
+    "moonlight",
     "current_location",
     "set_current_location",
 ]

@@ -42,10 +42,14 @@ from model import (
     Events,
     Journal,
     Lunation,
+    Moonlight,
     current_location,
     daylight,
-    moon_ingress,
+    moon_aspects,
+    moon_ingress_at,
     moon_phase,
+    moon_void_begins,
+    moonlight,
     planet_ingress,
     planet_station,
 )
@@ -80,10 +84,36 @@ _PLANET_GLYPHS = {key: glyph + _VS_TEXT for key, _, glyph in PLANETS}
 # when it stations direct (drawn under the planet glyph).
 _STATION_ARROWS = {"retrograde": "←", "direct": "→"}
 
+# Major-aspect glyphs for the Moon's aspects to planets. A begin mark reads
+# "<planet><aspect>" (the Moon coming to the aspect); an end mark reads
+# "<aspect><planet>" (the Moon leaving it). The trailing U+FE0E keeps the
+# glyphs monochrome rather than falling back to colour emoji.
+_ASPECT_GLYPHS = {
+    "conjunction": "☌" + _VS_TEXT,   # ☌
+    "sextile": "⚹" + _VS_TEXT,       # ⚹
+    "square": "□" + _VS_TEXT,        # □
+    "trine": "△" + _VS_TEXT,         # △
+    "opposition": "☍" + _VS_TEXT,    # ☍
+}
+
 # Daylight indicator geometry: a vertical bar flush with the tile's left
 # edge, whose vertical span is the civil-twilight daylight window.
 _DAYLIGHT_X = 0.0
 _DAYLIGHT_W = 8.0
+
+# Moon-rise/set bar: same width, packed immediately right of the daylight bar,
+# filled with a fine, dense forward-diagonal hatch (smaller gap = denser).
+_MOONBAR_W = 8.0
+_MOONBAR_HATCH_GAP = 1.7
+_MOONBAR_HATCH_WIDTH = 0.6
+# Gap left at a midnight edge so a span continuing onto the next day's tile
+# reads as a separate block rather than merging across the shared gridline.
+_MOONBAR_EDGE_GAP = 2.0
+# Smallest drawn thickness for a moon-up span, so a brief above-horizon period
+# near midnight stays visible instead of being swallowed by the edge gap.
+_MOONBAR_MIN_H = 2.5
+# Fade duration for the moon-bar hover time labels.
+_MOONBAR_FADE_MS = 180
 
 # Daylight hover interaction timing.
 _DAYLIGHT_HOVER_DELAY_MS = 250   # wait before the hover UI appears
@@ -206,11 +236,34 @@ class DayCell(QPushButton):
         self._theme: Theme | None = None
         self._lunation: Lunation | None = None
         self._ingress_sign: str | None = None  # moon-ingress zodiac abbrev
+        self._ingress_time: str | None = None  # local 'HH:MM' the Moon ingresses
         self._has_journal = False               # day has a journal entry
         self._ingress_marks: list[str] = []     # planet-ingress mark strings
         # planet-retrograde-station marks: (planet glyph, arrow) pairs.
         self._station_marks: list[tuple[str, str]] = []
+        # Moon-aspect marks (already-composed glyph strings) and the void-of-
+        # course flag, both stacked with the other astrological symbols.
+        self._aspect_marks: list[str] = []
+        self._void_begin: str | None = None      # 'HH:MM' the void starts
+        self._show_aspects = True                # View menu toggle
+        # When the astro-mark stack overflows the tile it scrolls within its
+        # right-hand strip (mouse wheel; no scrollbar). This is the offset.
+        self._marks_scroll = 0.0
         self._daylight: Daylight | None = None
+        # Moon-rise/set bar: the Moon's above-horizon span(s) for the day; a
+        # second left-edge bar, toggled independently of the daylight bar.
+        self._moonlight: Moonlight | None = None
+        self._show_moon_bar = True
+        # Per moon-up span, the ('rise', 'set') clock labels (only times that
+        # occur on this day); faded in when the span is hovered.
+        self._moon_labels: list[tuple[str | None, str | None]] = []
+        self._moon_hover_seg: int | None = None    # span under the cursor
+        self._moon_shown_seg: int | None = None    # span whose labels are drawn
+        self._moon_hover_progress = 0.0            # hover-label fade (0..1)
+        self._moon_hover_anim = QVariantAnimation(self)
+        self._moon_hover_anim.setDuration(_MOONBAR_FADE_MS)
+        self._moon_hover_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._moon_hover_anim.valueChanged.connect(self._on_moon_hover_anim)
         # Event canvas: a borderless box in the tile body holding event
         # glyphs; its border fades in (after a delay) while hovered.
         self._canvas_over = False        # mouse currently over the canvas
@@ -242,9 +295,14 @@ class DayCell(QPushButton):
         is_today: bool,
         lunation: Lunation | None,
         ingress_sign: str | None,
+        ingress_time: str | None,
         ingress_marks: list[str],
         station_marks: list[tuple[str, str]],
+        aspect_marks: list[str],
+        void_begins: str | None,
         daylight: Daylight | None,
+        moonlight: Moonlight | None,
+        moon_labels: list[tuple[str | None, str | None]],
         has_journal: bool,
         events: list[str],
     ) -> None:
@@ -254,9 +312,19 @@ class DayCell(QPushButton):
         self._weekend = day.weekday() >= 5
         self._lunation = lunation
         self._ingress_sign = ingress_sign
+        self._ingress_time = ingress_time
         self._ingress_marks = ingress_marks
         self._station_marks = station_marks
+        self._aspect_marks = aspect_marks
+        self._void_begin = void_begins
+        self._marks_scroll = 0.0
         self._daylight = daylight
+        self._moonlight = moonlight
+        self._moon_labels = moon_labels
+        self._moon_hover_anim.stop()
+        self._moon_hover_seg = None
+        self._moon_shown_seg = None
+        self._moon_hover_progress = 0.0
         self._has_journal = has_journal
         self._events = events
         self.update()
@@ -279,16 +347,114 @@ class DayCell(QPushButton):
         y1 = self._daylight.dusk_fraction * h
         return QRectF(_DAYLIGHT_X, y0, _DAYLIGHT_W * self._paint_scale(), y1 - y0)
 
+    def _bars_width(self) -> float:
+        """Total unscaled width of the visible left-edge bars (daylight, moon),
+        used to keep the day number and canvas clear of them."""
+        w = _DAYLIGHT_W if self._show_daylight else 0.0
+        w += _MOONBAR_W if self._show_moon_bar else 0.0
+        return w
+
+    def _moonbar_rects(self) -> list[QRectF]:
+        """The Moon's above-horizon span(s) as rectangles, just right of the
+        daylight bar (two rects when the span crosses midnight)."""
+        if not self._show_moon_bar or self._moonlight is None:
+            return []
+        s = self._paint_scale()
+        x = (_DAYLIGHT_W if self._show_daylight else 0.0) * s
+        bw = _MOONBAR_W * s
+        h = self.height()
+        gap = _MOONBAR_EDGE_GAP * s
+        min_h = _MOONBAR_MIN_H * s
+        rects = []
+        for (a, b) in self._moonlight.intervals:
+            # Inset only the midnight edges (a == 0 / b == 1), leaving the real
+            # moonrise/moonset endpoints sharp, so a span split across midnight
+            # stays visually distinct from the adjacent day's tile.
+            starts_mid = a <= 1e-6        # began before this day (rose earlier)
+            ends_mid = b >= 1.0 - 1e-6    # continues past this day (sets later)
+            top = a * h + (gap if starts_mid else 0.0)
+            bottom = b * h - (gap if ends_mid else 0.0)
+            # Keep brief spans visible: grow to a minimum thickness inward from
+            # the real (non-midnight) edge, so the inset midnight edge holds.
+            if bottom - top < min_h:
+                if ends_mid and not starts_mid:
+                    top = bottom - min_h
+                elif starts_mid and not ends_mid:
+                    bottom = top + min_h
+                else:
+                    mid = (a * h + b * h) / 2.0
+                    top, bottom = mid - min_h / 2.0, mid + min_h / 2.0
+            rects.append(QRectF(x, top, bw, bottom - top))
+        return rects
+
+    def _draw_hatch(self, p: QPainter, rect: QRectF,
+                    color: QColor, gap: float) -> None:
+        """Fill ``rect`` with dense forward-diagonal ('/') hatch lines."""
+        p.save()
+        p.setClipRect(rect)
+        pen = QPen(color)
+        pen.setWidthF(_MOONBAR_HATCH_WIDTH)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        x0, y0, h = rect.left(), rect.top(), rect.height()
+        i, extent = 0.0, rect.width() + h
+        while i <= extent:
+            p.drawLine(QPointF(x0 + i, y0), QPointF(x0 + i - h, y0 + h))
+            i += gap
+        p.restore()
+
+    def _moon_segment_at(self, pos) -> int | None:
+        """Index of the moon-bar span under ``pos``, or None."""
+        for idx, rect in enumerate(self._moonbar_rects()):
+            if rect.contains(pos):
+                return idx
+        return None
+
+    def _set_moon_hover(self, seg: int | None) -> None:
+        """Track the hovered moon span, fading its time labels in / out."""
+        if seg == self._moon_hover_seg:
+            return
+        self._moon_hover_seg = seg
+        if seg is not None:
+            self._moon_shown_seg = seg     # keep drawn through the fade
+            self._moon_fade_to(1.0)
+        else:
+            self._moon_fade_to(0.0)
+        self.update()
+
+    def _moon_fade_to(self, end: float) -> None:
+        if self._moon_hover_progress == end \
+                and self._moon_hover_anim.state() != QVariantAnimation.Running:
+            return
+        self._moon_hover_anim.stop()
+        self._moon_hover_anim.setStartValue(self._moon_hover_progress)
+        self._moon_hover_anim.setEndValue(end)
+        self._moon_hover_anim.start()
+
+    def _on_moon_hover_anim(self, value: float) -> None:
+        self._moon_hover_progress = float(value)
+        self.update()
+
     def _canvas_rect(self) -> QRectF:
         """The event-canvas box in the tile body (right of the daylight bar,
-        below the number/moon header)."""
+        below the number/moon header).
+
+        On the expanded tile the canvas occupies the left half of the body and
+        runs the full height below the day number (the right half is reserved
+        for the event-detail editor)."""
         s = self._paint_scale()
-        bar = _DAYLIGHT_W if self._show_daylight else 0.0
+        bar = self._bars_width()
         left = (bar + 5.0) * s
+        pad = _CANVAS_PAD * s
+        if self._standalone:
+            top = (_CANVAS_TOP + 8.0) * s  # clear of the enlarged day number
+            right = self.width() / 2.0
+            bottom = self.height() - _CANVAS_MARGIN * s
+            rect = QRectF(left, top, right - left, bottom - top)
+            return rect.adjusted(pad, pad, -pad, -pad)
         top = _CANVAS_TOP * s
         m = _CANVAS_MARGIN * s
         rect = QRectF(left, top, self.width() - left - m, self.height() - top - m)
-        pad = _CANVAS_PAD * s
         return rect.adjusted(pad, pad, -pad, -pad)
 
     def _set_canvas_over(self, over: bool) -> None:
@@ -324,6 +490,62 @@ class DayCell(QPushButton):
         if visible != self._show_daylight:
             self._show_daylight = visible
             self.update()
+
+    def set_moon_bar_visible(self, visible: bool) -> None:
+        if visible != self._show_moon_bar:
+            self._show_moon_bar = visible
+            self.update()
+
+    def set_aspects_visible(self, visible: bool) -> None:
+        if visible != self._show_aspects:
+            self._show_aspects = visible
+            self.update()
+
+    # -- astrological mark stack (scrollable when it overflows) -----------
+    def _visible_marks(self) -> list[str]:
+        """The ordered right-hand stack: planet ingresses, retrograde stations,
+        then (when shown) the Moon's aspects and a void-of-course mark."""
+        marks = list(self._ingress_marks)
+        marks += [f"{glyph}:{arrow}" for glyph, arrow in self._station_marks]
+        if self._show_aspects and self._void_begin:
+            # A void-of-course period is shown by the time it begins (the Moon
+            # makes its last aspect then); its end is the next sign-ingress time.
+            marks.append(self._void_begin)
+        return marks
+
+    def _marks_rect(self) -> QRectF:
+        """The right-hand strip the mark stack is drawn (and scrolled) within:
+        below the moon glyph, down to clear of the journal corner. Wide enough
+        for the void-of-course "HH:MM x" line."""
+        s = self._paint_scale()
+        top = 17.0 * s + _MOON_RADIUS * s + 4.0 * s   # just below the moon glyph
+        bottom = self.height() - (_CANVAS_MARGIN * s if self._standalone
+                                  else 14.0 * s)
+        left = self.width() - 54.0 * s
+        return QRectF(left, top, self.width() - left, max(0.0, bottom - top))
+
+    def _marks_overflow(self) -> float:
+        """How far the stack extends past its strip (0 if it all fits)."""
+        line = 12.0 * self._paint_scale()
+        content = len(self._visible_marks()) * line
+        return max(0.0, content - self._marks_rect().height())
+
+    def _clamp_marks_scroll(self) -> None:
+        self._marks_scroll = max(0.0, min(self._marks_scroll,
+                                          self._marks_overflow()))
+
+    def wheelEvent(self, event) -> None:
+        # Scroll the mark stack only while the cursor is over its strip and it
+        # actually overflows; otherwise let the event propagate normally.
+        if self._date is not None and self._marks_overflow() > 0 \
+                and self._marks_rect().contains(event.position()):
+            line = 12.0 * self._paint_scale()
+            self._marks_scroll -= event.angleDelta().y() / 120.0 * line
+            self._clamp_marks_scroll()
+            self.update()
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def _draw_time_label(self, p: QPainter, t: Theme, text: str,
                          x: float, y: float, anchor: str) -> None:
@@ -364,6 +586,7 @@ class DayCell(QPushButton):
             return
         self._hover = False
         self._set_canvas_over(False)
+        self._set_moon_hover(None)
         if self._daylight_hover:
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
@@ -388,6 +611,7 @@ class DayCell(QPushButton):
             self._daylight_hover = over
             self.update()
             self.daylight_hover_changed.emit()
+        self._set_moon_hover(self._moon_segment_at(pos))
         self._set_canvas_over(self._canvas_rect().contains(pos))
         super().mouseMoveEvent(event)
 
@@ -447,11 +671,24 @@ class DayCell(QPushButton):
         self._weekend = other._weekend
         self._lunation = other._lunation
         self._ingress_sign = other._ingress_sign
+        self._ingress_time = other._ingress_time
         self._ingress_marks = other._ingress_marks
         self._station_marks = other._station_marks
+        self._aspect_marks = other._aspect_marks
+        self._void_begin = other._void_begin
+        self._show_aspects = other._show_aspects
+        self._marks_scroll = 0.0
         self._daylight = other._daylight
         self._show_daylight = other._show_daylight
+        self._moonlight = other._moonlight
+        self._show_moon_bar = other._show_moon_bar
+        self._moon_labels = other._moon_labels
+        self._moon_hover_anim.stop()
+        self._moon_hover_seg = None
+        self._moon_shown_seg = None
+        self._moon_hover_progress = 0.0
         self._has_journal = other._has_journal
+        self._events = other._events
         self._journal_hover = False
         self.update()
 
@@ -464,7 +701,8 @@ class DayCell(QPushButton):
     def _number_hit_rect(self) -> QRectF:
         """Generous top-left region around the date number (collapse target)."""
         s = self._paint_scale()
-        left = (_DAYLIGHT_X + _DAYLIGHT_W + 4) if self._show_daylight else 9
+        bars = self._bars_width()
+        left = (bars + 4) if bars else 9
         return QRectF(0, 0, (left + 34) * s, 34 * s)
 
     def _journal_hit_rect(self) -> QRectF:
@@ -532,36 +770,45 @@ class DayCell(QPushButton):
                                       lx, daylight_rect.bottom(), "bottom")
                 p.restore()
 
-        # --- Event canvas (grid tiles only): a borderless box in the tile body
-        # holding one glyph per event; a border appears while hovered. ---
-        if not self._standalone:
-            canvas = self._canvas_rect()
-            if self._canvas_progress > 0:
-                p.save()
-                p.setOpacity(self._canvas_progress)
-                cpen = QPen(QColor(t.TEXT_FAINT))
-                cpen.setWidthF(1.0)
-                p.setPen(cpen)
-                p.setBrush(Qt.NoBrush)
-                p.drawRect(canvas)
-                p.restore()
-            if self._events:
-                gsize = _EVENT_GLYPH_SIZE * s
-                gap = 3.0 * s
-                font = QFont(self.font())
-                font.setPixelSize(max(1, round(gsize)))
-                p.setFont(font)
-                p.setPen(QColor(t.TEXT))
-                ex, ey = canvas.left() + gap, canvas.top() + gap
-                for glyph in self._events:
-                    if ex + gsize > canvas.right():
-                        ex = canvas.left() + gap
-                        ey += gsize + gap
-                    if ey + gsize > canvas.bottom():
-                        break  # no room for more glyphs
-                    p.drawText(QRectF(ex, ey, gsize, gsize),
-                               Qt.AlignCenter, glyph)
-                    ex += gsize + gap
+        # --- Moon bar: the Moon's above-horizon span(s), a diagonal-hatch grey
+        # bar packed just right of the daylight bar. It splits into two rects
+        # on days the Moon is up across midnight. ---
+        for moon_rect in self._moonbar_rects():
+            mcol = QColor(t.TEXT_FAINT)  # a light grey, distinct from the glyph
+            if not self._in_month:
+                mcol.setAlpha(110)
+            self._draw_hatch(p, moon_rect, mcol, _MOONBAR_HATCH_GAP * s)
+
+        # --- Event canvas: a box in the tile body holding one glyph per event.
+        # Grid tiles are borderless until hovered; the expanded tile shows the
+        # day's events in a fixed left-half region. ---
+        canvas = self._canvas_rect()
+        if not self._standalone and self._canvas_progress > 0:
+            p.save()
+            p.setOpacity(self._canvas_progress)
+            cpen = QPen(QColor(t.TEXT_FAINT))
+            cpen.setWidthF(1.0)
+            p.setPen(cpen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(canvas)
+            p.restore()
+        if self._events:
+            gsize = _EVENT_GLYPH_SIZE * s
+            gap = 3.0 * s
+            font = QFont(self.font())
+            font.setPixelSize(max(1, round(gsize)))
+            p.setFont(font)
+            p.setPen(QColor(t.TEXT))
+            ex, ey = canvas.left() + gap, canvas.top() + gap
+            for glyph in self._events:
+                if ex + gsize > canvas.right():
+                    ex = canvas.left() + gap
+                    ey += gsize + gap
+                if ey + gsize > canvas.bottom():
+                    break  # no room for more glyphs
+                p.drawText(QRectF(ex, ey, gsize, gsize),
+                           Qt.AlignCenter, glyph)
+                ex += gsize + gap
 
         # --- Top-right glyph: the zodiac sign on a day the Moon enters a new
         # sign, otherwise the moon-phase shape (crescent/quarter/gibbous/full).
@@ -579,6 +826,14 @@ class DayCell(QPushButton):
                 p.setPen(base)
                 p.drawText(QRectF(cx - 9 * s, cy - 9 * s, 18 * s, 18 * s),
                            Qt.AlignCenter, glyph)
+                # Local time the Moon enters the sign, to the glyph's left (this
+                # is also when a void-of-course period ends).
+                if self._ingress_time:
+                    tfont = QFont(self.font())
+                    tfont.setPixelSize(max(1, round(10 * s)))
+                    p.setFont(tfont)
+                    p.drawText(QRectF(0, cy - 9 * s, cx - 11 * s, 18 * s),
+                               Qt.AlignRight | Qt.AlignVCenter, self._ingress_time)
         elif self._lunation is not None:
             # Faint full-disc outline marks the unlit limb (visible at new moon).
             outline = QColor(t.MOON)
@@ -598,23 +853,34 @@ class DayCell(QPushButton):
             ))
 
         # --- Astro marks, stacked right-aligned below the moon glyph: planet
-        # ingresses ("<planet>:<sign>") then retrograde stations
-        # ("<planet>:<arrow>", left = retrograde, right = direct). ---
-        right = QRectF(2, 0, w - 5 * s, 13 * s)
-        y = cy + r + 4 * s
-        if self._ingress_marks or self._station_marks:
+        # ingresses ("<planet>:<sign>"), retrograde stations ("<planet>:<arrow>",
+        # left = retrograde, right = direct), then the Moon's aspects (begin =
+        # "<planet><aspect>", end = "<aspect><planet>") and a void-of-course
+        # "x". When the stack is taller than its strip it scrolls (mouse wheel,
+        # no scrollbar); drawing is clipped to the strip so it never spills onto
+        # the journal corner or other elements. ---
+        marks = self._visible_marks()
+        if marks:
+            self._clamp_marks_scroll()  # stay valid as the day's marks change
+            mrect = self._marks_rect()
+            right = QRectF(2, 0, w - 5 * s, 13 * s)
+            line = 12 * s
             font = QFont(self.font())
-            font.setPixelSize(max(1, round(11 * s)))
-            p.setFont(font)
             p.setPen(base)
-            for mark in self._ingress_marks:
-                p.drawText(right.translated(0, y),
-                           Qt.AlignRight | Qt.AlignVCenter, mark)
-                y += 12 * s
-            for glyph, arrow in self._station_marks:
-                p.drawText(right.translated(0, y),
-                           Qt.AlignRight | Qt.AlignVCenter, f"{glyph}:{arrow}")
-                y += 12 * s
+            p.save()
+            p.setClipRect(mrect)
+            y = mrect.top() - self._marks_scroll
+            for mark in marks:
+                if y < mrect.bottom() and y + 13 * s > mrect.top():
+                    # The void-of-course time is drawn smaller, matching the
+                    # sign-ingress time; aspect/ingress glyphs stay at 11.
+                    size = 10 if mark is self._void_begin else 11
+                    font.setPixelSize(max(1, round(size * s)))
+                    p.setFont(font)
+                    p.drawText(right.translated(0, y),
+                               Qt.AlignRight | Qt.AlignVCenter, mark)
+                y += line
+            p.restore()
 
         # --- Date number, top-left. Greyscale only: emphasis comes from
         # styling, not color. Today, the hovered tile, and the expanded tile
@@ -630,9 +896,10 @@ class DayCell(QPushButton):
         font.setUnderline(self._standalone and self._today)
         p.setFont(font)
         p.setPen(num_color)
-        # Start the number right of the daylight bar (when shown) so they
+        # Start the number right of the left-edge bars (when shown) so they
         # never overlap; otherwise use the normal left padding.
-        left = (_DAYLIGHT_X + _DAYLIGHT_W + 4) if self._show_daylight else 9
+        bars = self._bars_width()
+        left = (bars + 4) if bars else 9
         text_rect = QRectF(self.rect()).adjusted(left * s, 9 * s, -5 * s, -5 * s)
         p.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
 
@@ -655,6 +922,26 @@ class DayCell(QPushButton):
             jpen.setWidthF(j_width)
             p.setPen(jpen)
             p.drawLine(QPointF(w - d, h - 1.0), QPointF(w - 1.0, h - d))
+
+        # --- Moon-bar hover: the hovered span's moonrise (at its top) and
+        # moonset (at its bottom) as small time chips. Rise/set may fall on the
+        # neighbouring day when the span crosses midnight. ---
+        if not self._standalone and self._moon_hover_progress > 0 \
+                and self._moon_shown_seg is not None:
+            rects = self._moonbar_rects()
+            seg = self._moon_shown_seg
+            if 0 <= seg < len(rects) and seg < len(self._moon_labels):
+                mr = rects[seg]
+                rise, set_label = self._moon_labels[seg]
+                lx = mr.right() + 3
+                p.save()
+                p.setOpacity(self._moon_hover_progress)
+                if rise:
+                    self._draw_time_label(p, t, "↑ " + rise, lx, mr.top(), "top")
+                if set_label:
+                    self._draw_time_label(p, t, "↓ " + set_label,
+                                          lx, mr.bottom(), "bottom")
+                p.restore()
 
         p.end()
 
@@ -987,6 +1274,18 @@ class MonthView(QWidget):
         for c in self._cells:
             c.set_daylight_visible(visible)
 
+    def set_aspects_visible(self, visible: bool) -> None:
+        """Show/hide the Moon-aspect and void-of-course marks (View menu)."""
+        for c in self._cells:
+            c.set_aspects_visible(visible)
+        self._expanded.set_aspects_visible(visible)
+
+    def set_moon_bar_visible(self, visible: bool) -> None:
+        """Show/hide the moon-rise/set bar across the whole month (View menu)."""
+        for c in self._cells:
+            c.set_moon_bar_visible(visible)
+        self._expanded.set_moon_bar_visible(visible)
+
     def reload(self) -> None:
         """Re-render the month (e.g. after the location changes)."""
         self._refresh()
@@ -1019,6 +1318,35 @@ class MonthView(QWidget):
                 if sign_glyph:
                     marks.append(f"{_PLANET_GLYPHS[key]}:{sign_glyph}")
         return marks
+
+    def _moon_aspect_marks(self, day, location) -> list[str]:
+        """Composed glyph strings for the Moon's aspects on ``day``: planet then
+        aspect where the aspect begins, aspect then planet where it ends."""
+        marks = []
+        for a in moon_aspects(day, location):
+            planet = _PLANET_GLYPHS.get(a.planet, "")
+            aspect = _ASPECT_GLYPHS.get(a.aspect, "")
+            if not planet or not aspect:
+                continue
+            marks.append(planet + aspect if a.phase == "begin"
+                         else aspect + planet)
+        return marks
+
+    def _moon_span_labels(self, day) -> list[tuple[str | None, str | None]]:
+        """For each of the day's moon-up spans, the (moonrise, moonset) clock
+        labels — but only the events that actually occur on this day. A span
+        cut by midnight hides the time that belongs to the neighbouring day:
+        a span starting at midnight shows only its moonset, one ending at
+        midnight shows only its moonrise."""
+        ml = moonlight(day)
+        if ml is None:
+            return []
+        labels = []
+        for (a, b) in ml.intervals:
+            rise = ml.rise_label if a > 1e-6 else None       # rose the day before
+            sets = ml.set_label if b < 1.0 - 1e-6 else None  # sets the next day
+            labels.append((rise, sets))
+        return labels
 
     def _station_marks(self, day, location) -> list[tuple[str, str]]:
         """Retrograde-station marks (glyph, arrow) for the enabled planets."""
@@ -1118,16 +1446,22 @@ class MonthView(QWidget):
             row, col = divmod(idx, 7)
             if row < len(weeks):
                 day = weeks[row][col]
+                ingress = moon_ingress_at(day, location)
                 cell.setVisible(True)
                 cell.set_day(
                     day,
                     in_month=self._model.is_in_displayed_month(day),
                     is_today=(day == today),
                     lunation=moon_phase(day),
-                    ingress_sign=moon_ingress(day),
+                    ingress_sign=ingress[0] if ingress else None,
+                    ingress_time=ingress[1] if ingress else None,
                     ingress_marks=self._planet_marks(day, location),
                     station_marks=self._station_marks(day, location),
+                    aspect_marks=self._moon_aspect_marks(day, location),
+                    void_begins=moon_void_begins(day, location),
                     daylight=daylight(day),
+                    moonlight=moonlight(day),
+                    moon_labels=self._moon_span_labels(day),
                     has_journal=self._journal.has(day),
                     events=self._events.symbols(day),
                 )

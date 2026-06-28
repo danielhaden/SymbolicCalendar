@@ -117,6 +117,16 @@ class MainWindow(QMainWindow):
         daylight_action.setChecked(True)
         daylight_action.toggled.connect(self._month_view.set_daylight_visible)
 
+        moonbar_action = view_menu.addAction("Show Moon Rise/Set")
+        moonbar_action.setCheckable(True)
+        moonbar_action.setChecked(True)
+        moonbar_action.toggled.connect(self._month_view.set_moon_bar_visible)
+
+        aspects_action = view_menu.addAction("Show Moon Aspects")
+        aspects_action.setCheckable(True)
+        aspects_action.setChecked(True)
+        aspects_action.toggled.connect(self._month_view.set_aspects_visible)
+
         ingress_menu = view_menu.addMenu("Planet Ingresses")
         for key, name, _glyph in PLANETS:
             action = ingress_menu.addAction(f"Show {name} Ingresses")

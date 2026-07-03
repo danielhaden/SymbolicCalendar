@@ -198,6 +198,10 @@ class DayCell(QPushButton):
     double_clicked = Signal()
     # Emitted on right double-click within the canvas, to create an event.
     event_create_requested = Signal()
+    # Emitted (expanded tile) on double-click of an event, to edit its note.
+    event_note_requested = Signal(int)
+    # Emitted (expanded tile) on any press, so an open inline editor can save.
+    tile_pressed = Signal()
     # Emitted (standalone/expanded tile only) when the day number is clicked.
     collapse_requested = Signal()
     # Emitted (expanded tile) when the journal corner is clicked (toggle).
@@ -276,7 +280,7 @@ class DayCell(QPushButton):
         self._canvas_anim.setDuration(_CANVAS_FADE_MS)
         self._canvas_anim.setEasingCurve(QEasingCurve.InOutQuad)
         self._canvas_anim.valueChanged.connect(self._on_canvas_anim)
-        self._events: list[str] = []            # one glyph per event
+        self._events: list[Event] = []          # this day's events (symbol+notes)
         # Seamless grid: every cell draws its left + bottom edge, so a tile's
         # bottom coincides with the horizontal gridline. Row 0 / the last
         # column add the outer top / right edges.
@@ -304,7 +308,7 @@ class DayCell(QPushButton):
         moonlight: Moonlight | None,
         moon_labels: list[tuple[str | None, str | None]],
         has_journal: bool,
-        events: list[str],
+        events: list[Event],
     ) -> None:
         self._date = day
         self._in_month = in_month
@@ -456,6 +460,35 @@ class DayCell(QPushButton):
         m = _CANVAS_MARGIN * s
         rect = QRectF(left, top, self.width() - left - m, self.height() - top - m)
         return rect.adjusted(pad, pad, -pad, -pad)
+
+    def _event_layout(self) -> list[tuple[int, QRectF, QRectF]]:
+        """Expanded-tile event rows: (index, glyph_rect, note_rect) laid out as
+        a vertical list within the canvas. Empty for grid tiles."""
+        if not self._standalone or not self._events:
+            return []
+        s = self._paint_scale()
+        canvas = self._canvas_rect()
+        gsize = _EVENT_GLYPH_SIZE * s
+        gap = 6.0 * s
+        row_h = gsize + 8.0 * s
+        rows = []
+        y = canvas.top()
+        for i in range(len(self._events)):
+            if y + row_h > canvas.bottom():
+                break  # no room for more rows
+            grect = QRectF(canvas.left(), y, gsize, row_h)
+            nx = canvas.left() + gsize + gap
+            nrect = QRectF(nx, y, max(0.0, canvas.right() - nx), row_h)
+            rows.append((i, grect, nrect))
+            y += row_h + gap
+        return rows
+
+    def _event_at(self, pos) -> int | None:
+        """Index of the expanded-tile event row (glyph or note) under ``pos``."""
+        for i, grect, nrect in self._event_layout():
+            if grect.united(nrect).contains(pos):
+                return i
+        return None
 
     def _set_canvas_over(self, over: bool) -> None:
         """Track whether the cursor is over the canvas, with a delayed fade-in
@@ -617,6 +650,7 @@ class DayCell(QPushButton):
 
     def mousePressEvent(self, event) -> None:
         if self._standalone:
+            self.tile_pressed.emit()  # let any open inline editor save first
             pos = event.position()
             if self._number_hit_rect().contains(pos):
                 self.collapse_requested.emit()
@@ -628,7 +662,14 @@ class DayCell(QPushButton):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if not self._standalone and self._date is not None:
+        if self._standalone:
+            if self._date is not None:
+                idx = self._event_at(event.position())
+                if idx is not None:
+                    self.event_note_requested.emit(idx)  # edit this event's note
+            super().mouseDoubleClickEvent(event)
+            return
+        if self._date is not None:
             if event.button() == Qt.LeftButton:
                 self.double_clicked.emit()       # expand to day view
             elif event.button() == Qt.RightButton \
@@ -792,7 +833,26 @@ class DayCell(QPushButton):
             p.setBrush(Qt.NoBrush)
             p.drawRect(canvas)
             p.restore()
-        if self._events:
+        if self._events and self._standalone:
+            # Expanded tile: a vertical list of events, each glyph with its note
+            # text alongside. (Notes are never shown in the month grid.)
+            gsize = _EVENT_GLYPH_SIZE * s
+            gfont = QFont(self.font())
+            gfont.setPixelSize(max(1, round(gsize)))
+            nfont = QFont(self.font())
+            nfont.setPixelSize(max(1, round(12 * s)))
+            for i, grect, nrect in self._event_layout():
+                e = self._events[i]
+                p.setFont(gfont)
+                p.setPen(QColor(t.TEXT))
+                p.drawText(grect, Qt.AlignCenter, e.symbol)
+                if e.notes:
+                    p.setFont(nfont)
+                    p.setPen(QColor(t.TEXT_MUTED))
+                    p.drawText(nrect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap,
+                               e.notes)
+        elif self._events:
+            # Month grid: glyphs only, flowing left-to-right and wrapping.
             gsize = _EVENT_GLYPH_SIZE * s
             gap = 3.0 * s
             font = QFont(self.font())
@@ -800,14 +860,14 @@ class DayCell(QPushButton):
             p.setFont(font)
             p.setPen(QColor(t.TEXT))
             ex, ey = canvas.left() + gap, canvas.top() + gap
-            for glyph in self._events:
+            for e in self._events:
                 if ex + gsize > canvas.right():
                     ex = canvas.left() + gap
                     ey += gsize + gap
                 if ey + gsize > canvas.bottom():
                     break  # no room for more glyphs
                 p.drawText(QRectF(ex, ey, gsize, gsize),
-                           Qt.AlignCenter, glyph)
+                           Qt.AlignCenter, e.symbol)
                 ex += gsize + gap
 
         # --- Top-right glyph: the zodiac sign on a day the Moon enters a new
@@ -997,6 +1057,8 @@ class MonthView(QWidget):
         self._expanded.journal_requested.connect(self._toggle_journal)
         self._expanded.outside_journal_clicked.connect(self._dismiss_journal)
         self._expanded.delete_journal_requested.connect(self._delete_journal_entry)
+        self._expanded.event_note_requested.connect(self._open_note)
+        self._expanded.tile_pressed.connect(self._save_note)
         self._expand_anim = QPropertyAnimation(self._expanded, b"geometry", self)
         self._expand_anim.setDuration(300)
         self._expand_anim.setEasingCurve(QEasingCurve.InOutCubic)
@@ -1012,8 +1074,17 @@ class MonthView(QWidget):
         self._editing_journal = False
         self._journal_day = None
 
+        # Event-note editor: a small textbox shown next to an event's glyph in
+        # the expanded view; saves when the user clicks away.
+        self._note_edit = QTextEdit(self)
+        self._note_edit.setObjectName("noteEdit")
+        self._note_edit.hide()
+        self._editing_note_index: int | None = None
+        self._note_day = None
+
         self._model.month_changed.connect(lambda *_: self._refresh())
         self._model.selected_date_changed.connect(lambda *_: self._refresh())
+        self._model.today_changed.connect(lambda *_: self._refresh())
         self._theme.theme_changed.connect(self._apply_theme)
 
         self._apply_theme()
@@ -1028,6 +1099,7 @@ class MonthView(QWidget):
             return
         self._expanded.set_theme(self._theme.current)
         self._expanded.copy_from(cell)
+        self._expanded._events = self._events.get(cell.date)  # fresh notes
         self._expanded_start = QRect(cell.geometry())
         self._collapsing = False
         self._expanded.setGeometry(self._expanded_start)
@@ -1041,6 +1113,8 @@ class MonthView(QWidget):
     def _collapse_day(self) -> None:
         if not self._expanded.isVisible():
             return
+        if self._editing_note_index is not None:
+            self._save_note()
         if self._editing_journal:
             self._save_journal()
         self._collapsing = True
@@ -1105,6 +1179,57 @@ class MonthView(QWidget):
         self._journal_edit.hide()
         self._refresh()  # update journal indicators in the grid
 
+    # -- event notes (expanded view) -------------------------------------
+    def _open_note(self, index: int) -> None:
+        day = self._expanded.date
+        if day is None:
+            return
+        events = self._events.get(day)
+        if not 0 <= index < len(events):
+            return
+        if self._editing_note_index is not None and self._editing_note_index != index:
+            self._save_note()  # commit any other note first
+        self._note_day = day
+        self._editing_note_index = index
+        self._note_edit.setPlainText(events[index].notes)
+        if not self._position_note_edit():
+            return
+        self._note_edit.show()
+        self._note_edit.raise_()
+        self._note_edit.setFocus()
+
+    def _position_note_edit(self) -> bool:
+        """Place the note box just right of the editing event's glyph."""
+        if self._editing_note_index is None:
+            return False
+        grect = next((g for i, g, _ in self._expanded._event_layout()
+                      if i == self._editing_note_index), None)
+        if grect is None:
+            return False
+        tile = self._expanded.geometry()
+        x = int(tile.x() + grect.right() + 8)
+        y = int(tile.y() + grect.top())
+        w = min(240, max(120, self.width() - x - 12))
+        self._note_edit.setGeometry(x, y, w, 64)
+        return True
+
+    def _save_note(self) -> None:
+        if self._editing_note_index is None or self._note_day is None:
+            return
+        idx = self._editing_note_index
+        events = self._events.get(self._note_day)
+        if 0 <= idx < len(events):
+            e = events[idx]
+            self._events.update(self._note_day, idx, Event(
+                symbol=e.symbol, title=e.title,
+                notes=self._note_edit.toPlainText().strip()))
+        self._editing_note_index = None
+        self._note_edit.hide()
+        # Refresh the expanded tile so the saved note shows beside its glyph.
+        if self._expanded.date == self._note_day:
+            self._expanded._events = self._events.get(self._note_day)
+            self._expanded.update()
+
     def resizeEvent(self, event) -> None:
         # Keep a fully-expanded overlay matching the view as the window resizes.
         if self._expanded.isVisible() and not self._collapsing \
@@ -1112,6 +1237,8 @@ class MonthView(QWidget):
             self._expanded.setGeometry(self.rect())
             if self._editing_journal:
                 self._position_journal_edit()
+            if self._editing_note_index is not None:
+                self._position_note_edit()
         super().resizeEvent(event)
 
     # -- construction ----------------------------------------------------
@@ -1425,6 +1552,18 @@ class MonthView(QWidget):
             }}
             """
         )
+        self._note_edit.setStyleSheet(
+            f"""
+            QTextEdit#noteEdit {{
+                background-color: {t.BG_1};
+                color: {t.TEXT};
+                border: 1px solid {t.ACCENT};
+                border-radius: 6px;
+                padding: 4px 6px;
+                font-size: 13px;
+            }}
+            """
+        )
 
     # -- behaviour -------------------------------------------------------
     def _on_cell_clicked(self) -> None:
@@ -1435,6 +1574,8 @@ class MonthView(QWidget):
             self._model.go_to_month(cell.date.year, cell.date.month)
 
     def _refresh(self) -> None:
+        if self._editing_note_index is not None:
+            self._save_note()  # commit an open note before the grid rebuilds
         self._dl_reset()  # drop any daylight-hover overlay from the old month
         self._title.setText(self._model.month_title())
         weeks = self._model.weeks()
@@ -1463,7 +1604,7 @@ class MonthView(QWidget):
                     moonlight=moonlight(day),
                     moon_labels=self._moon_span_labels(day),
                     has_journal=self._journal.has(day),
-                    events=self._events.symbols(day),
+                    events=self._events.get(day),
                 )
                 cell.set_grid_edges(top=(row == 0), right=(col == 6))
             else:

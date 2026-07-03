@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QFileDialog, QFrame, QMainWindow, QVBoxLayout
 
@@ -67,6 +67,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(_Panel(self._month_view, self._theme))
 
         self._build_menu_bar()
+
+        # Poll for a date rollover so a long-running window keeps "today"
+        # current (the model only re-renders when notified). Checking every
+        # 15 minutes updates the highlight within a quarter-hour of midnight.
+        self._today_timer = QTimer(self)
+        self._today_timer.setInterval(15 * 60 * 1000)  # 15 minutes
+        self._today_timer.timeout.connect(self._model.refresh_today)
+        self._today_timer.start()
 
     def _build_menu_bar(self) -> None:
         self._build_view_menu()

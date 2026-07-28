@@ -54,6 +54,7 @@ class Events:
 
     def _save(self) -> None:
         try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
             data = {k: [asdict(e) for e in v] for k, v in self._by_day.items()}
             self._path.write_text(
                 json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"

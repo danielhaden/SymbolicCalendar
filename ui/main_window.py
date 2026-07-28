@@ -6,7 +6,15 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    Qt,
+    QSettings,
+    QStandardPaths,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import QActionGroup, QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -153,16 +161,16 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(720, 480)
 
         self._settings = QSettings("CalendarApp", "Calendar")
-        # One data folder holds journal.json + events.json. Fall back to the
-        # legacy journal-folder setting, then to the default location.
+        # One data folder holds journal.json + events.json: the folder the user
+        # picked (or the legacy journal-folder key), otherwise a per-user
+        # app-data directory. The old default resolved next to the code, which
+        # in a packaged build meant *inside the .app bundle* — avoid that.
         folder = (self._settings.value("data/folder", "", type=str)
-                  or self._settings.value("journal/folder", "", type=str))
-        if folder:
-            self._journal = Journal(Path(folder) / "journal.json")
-            self._events = Events(Path(folder) / "events.json")
-        else:
-            self._journal = Journal()
-            self._events = Events()
+                  or self._settings.value("journal/folder", "", type=str)
+                  or self._default_data_folder())
+        data_dir = Path(folder)
+        self._journal = Journal(data_dir / "journal.json")
+        self._events = Events(data_dir / "events.json")
         self._month_view = MonthView(
             self._model, self._theme, self._journal, self._events
         )
@@ -213,6 +221,16 @@ class MainWindow(QMainWindow):
         self._data_folder_action = settings_menu.addAction("")
         self._data_folder_action.setEnabled(False)  # a non-clickable label
         self._update_data_folder_label()
+
+    @staticmethod
+    def _default_data_folder() -> str:
+        """Per-user data directory when the user hasn't chosen one — on macOS
+        ``~/Library/Application Support/Calendar``. Deliberately outside the app
+        bundle so a packaged build never writes into itself."""
+        base = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.GenericDataLocation)
+        root = Path(base) if base else Path.home()
+        return str(root / "Calendar")
 
     def _update_data_folder_label(self) -> None:
         self._data_folder_action.setText(

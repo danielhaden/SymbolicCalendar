@@ -1,0 +1,13 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <title>Calendar app icon — crescent moon</title>
+  <desc>A white crescent moon on a black rounded square.</desc>
+  <defs>
+    <mask id="crescent">
+      <rect width="1024" height="1024" fill="black"/>
+      <circle cx="512" cy="530" r="269" fill="white"/>
+      <circle cx="655" cy="405" r="278" fill="black"/>
+    </mask>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#141414"/>
+  <rect width="1024" height="1024" fill="#ffffff" mask="url(#crescent)"/>
+</svg>

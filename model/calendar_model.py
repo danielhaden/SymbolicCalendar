@@ -20,6 +20,8 @@ class CalendarModel(QObject):
     month_changed = Signal(int, int)
     # Emitted when the selected day changes.
     selected_date_changed = Signal(date)
+    # Emitted when the calendar date rolls over (the real "today" changed).
+    today_changed = Signal(date)
 
     def __init__(self, today: date | None = None, first_weekday: int = 6) -> None:
         super().__init__()
@@ -99,3 +101,15 @@ class CalendarModel(QObject):
     def go_to_today(self) -> None:
         """Jump the view to today's month and select today."""
         self.select_date(self._today)
+
+    def refresh_today(self) -> date:
+        """Re-read the system date; if the day rolled over, update and notify.
+
+        The view keeps ``today`` fixed at launch otherwise, so a long-running
+        window would highlight a stale day. Callers poll this periodically.
+        """
+        now = date.today()
+        if now != self._today:
+            self._today = now
+            self.today_changed.emit(now)
+        return self._today

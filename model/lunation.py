@@ -11,11 +11,13 @@ lunation: 0 = new moon, 180 = full moon. The moon is *waxing* (growing) from
 
 from __future__ import annotations
 
+import bisect
 import logging
 import math
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 # kerykeion is chatty at import/compute time; keep it quiet.
 logging.getLogger("kerykeion").setLevel(logging.WARNING)
@@ -26,6 +28,13 @@ try:
     _KERYKEION_AVAILABLE = True
 except Exception:  # pragma: no cover - optional dependency
     _KERYKEION_AVAILABLE = False
+
+try:
+    import swisseph as swe
+
+    _SWE_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    _SWE_AVAILABLE = False
 
 
 @dataclass(frozen=True)
@@ -190,3 +199,214 @@ def planet_station(planet: str, day: date, location: "Location") -> str | None:
 def venus_ingress(day: date, location: "Location") -> str | None:
     """The zodiac sign Venus enters on ``day`` (local time), or None."""
     return planet_ingress("venus", day, location)
+
+
+# --- Moon aspects & void-of-course --------------------------------------
+#
+# As the (fast) Moon circles the zodiac it forms the major (Ptolemaic) aspects
+# with each planet. Each aspect has an orb, so it has a duration: it *begins*
+# when the Moon comes within orb of exact, perfects, then *ends* when the Moon
+# separates back out of orb. After the Moon perfects its last aspect in a sign
+# it is "void-of-course" until it enters the next sign.
+
+# Major aspect -> exact angle (degrees).
+MOON_ASPECTS = {
+    "conjunction": 0.0,
+    "sextile": 60.0,
+    "square": 90.0,
+    "trine": 120.0,
+    "opposition": 180.0,
+}
+# Moon-minus-planet longitudes (mod 360) at which each aspect perfects. The
+# soft angles perfect twice per cycle (waxing and waning), conjunction and
+# opposition once.
+_ASPECT_TARGETS = {
+    "conjunction": (0.0,),
+    "sextile": (60.0, 300.0),
+    "square": (90.0, 270.0),
+    "trine": (120.0, 240.0),
+    "opposition": (180.0,),
+}
+# The bodies the Moon's aspects are tracked against: the eight planets. (The
+# Moon's aspects to the Sun are the lunar phases, already shown by the phase
+# glyph, so the Sun is excluded here and from the void-of-course test.)
+_ASPECT_BODIES = {
+    "mercury": swe.MERCURY, "venus": swe.VENUS, "mars": swe.MARS,
+    "jupiter": swe.JUPITER, "saturn": swe.SATURN, "uranus": swe.URANUS,
+    "neptune": swe.NEPTUNE, "pluto": swe.PLUTO,
+} if _SWE_AVAILABLE else {}
+
+# Zodiac sign abbreviations in order from 0° Aries (kerykeion's codes).
+_SIGN_ABBREVS = ("Ari", "Tau", "Gem", "Can", "Leo", "Vir",
+                 "Lib", "Sco", "Sag", "Cap", "Aqu", "Pis")
+
+_MOON_ORB = 6.0           # degrees from exact at which an aspect begins / ends
+_ASPECT_STEP_HOURS = 2.0  # sampling step; the relevant angles vary smoothly
+_ASPECT_PAD_DAYS = 3      # extra days sampled each side (Moon ~2.3 days/sign)
+
+
+@dataclass(frozen=True)
+class MoonAspect:
+    """A significant Moon-planet aspect beginning or ending on a day."""
+
+    planet: str   # key into _ASPECT_BODIES (e.g. 'mars')
+    aspect: str   # key into MOON_ASPECTS (e.g. 'trine')
+    phase: str    # 'begin' (Moon enters orb) or 'end' (Moon leaves orb)
+
+
+def _jd_utc(dt: datetime) -> float:
+    """Julian day (UT) for an aware UTC datetime."""
+    return swe.julday(dt.year, dt.month, dt.day,
+                      dt.hour + dt.minute / 60.0 + dt.second / 3600.0)
+
+
+def _lon(jd: float, body: int) -> float:
+    """Tropical ecliptic longitude of ``body`` at ``jd`` (Moshier ephemeris)."""
+    return swe.calc_ut(jd, body, swe.FLG_MOSEPH)[0][0]
+
+
+def _unwrap(seq: list[float]) -> list[float]:
+    """Unwrap a 0..360 angle series into a continuous (here monotonically
+    increasing, as the Moon outruns every planet) sequence."""
+    phi = [seq[0]]
+    for k in range(1, len(seq)):
+        d = seq[k] - seq[k - 1]
+        if d < -180.0:
+            d += 360.0
+        elif d > 180.0:
+            d -= 360.0
+        phi.append(phi[-1] + d)
+    return phi
+
+
+def _cross_time(phi: list[float], times: list[datetime],
+                target: float) -> datetime | None:
+    """When the increasing series ``phi`` first reaches ``target`` (linearly
+    interpolated between samples), or None if ``target`` is out of range."""
+    if target < phi[0] or target > phi[-1]:
+        return None
+    k = bisect.bisect_left(phi, target)
+    if k <= 0:
+        return times[0]
+    span = phi[k] - phi[k - 1]
+    frac = 0.0 if span == 0 else (target - phi[k - 1]) / span
+    return times[k - 1] + (times[k] - times[k - 1]) * frac
+
+
+@lru_cache(maxsize=64)
+def _moon_month_events(year: int, month: int, location: "Location") -> dict:
+    """All Moon-aspect begin/end marks (by local day) and the set of void-of-
+    course local days for the month containing (year, month). Cached per month.
+    """
+    empty = {"aspects": {}, "voc": frozenset(), "voc_begin": {}, "ingress": {}}
+    if not _SWE_AVAILABLE:
+        return empty
+    try:
+        tz = ZoneInfo(location.tz_name)
+        first = date(year, month, 1)
+        nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        start = (datetime(first.year, first.month, first.day, tzinfo=tz)
+                 - timedelta(days=_ASPECT_PAD_DAYS)).astimezone(timezone.utc)
+        end = (datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz)
+               + timedelta(days=_ASPECT_PAD_DAYS)).astimezone(timezone.utc)
+
+        step = timedelta(hours=_ASPECT_STEP_HOURS)
+        times: list[datetime] = []
+        t = start
+        while t <= end:
+            times.append(t)
+            t += step
+        jds = [_jd_utc(t) for t in times]
+        moon = [_lon(jd, swe.MOON) for jd in jds]
+
+        def _local_date(dt: datetime) -> date:
+            return dt.astimezone(tz).date()
+
+        aspects: dict[date, list[tuple[datetime, MoonAspect]]] = {}
+        perfections: list[datetime] = []
+
+        for pname, body in _ASPECT_BODIES.items():
+            plon = [_lon(jd, body) for jd in jds]
+            phi = _unwrap([(moon[k] - plon[k]) % 360.0 for k in range(len(jds))])
+            for aname, targets in _ASPECT_TARGETS.items():
+                for base in targets:
+                    n0 = math.ceil((phi[0] - base) / 360.0)
+                    n1 = math.floor((phi[-1] - base) / 360.0)
+                    for n in range(n0, n1 + 1):
+                        level = base + 360.0 * n
+                        tp = _cross_time(phi, times, level)
+                        if tp is not None:
+                            perfections.append(tp)
+                        tb = _cross_time(phi, times, level - _MOON_ORB)
+                        if tb is not None:
+                            aspects.setdefault(_local_date(tb), []).append(
+                                (tb, MoonAspect(pname, aname, "begin")))
+                        te = _cross_time(phi, times, level + _MOON_ORB)
+                        if te is not None:
+                            aspects.setdefault(_local_date(te), []).append(
+                                (te, MoonAspect(pname, aname, "end")))
+
+        aspects_by_day = {
+            d: [ma for _, ma in sorted(items, key=lambda it: it[0])]
+            for d, items in aspects.items()
+        }
+
+        # The Moon's sign ingresses (each enters a sign at a local time), then
+        # the void-of-course span before each — from the Moon's last perfected
+        # aspect in the old sign until that ingress.
+        moon_phi = _unwrap(moon)
+        ingresses = []            # (utc_time, sign_abbrev)
+        ingress_map: dict[date, tuple[str, str]] = {}
+        for m in range(math.ceil(moon_phi[0] / 30.0),
+                       math.floor(moon_phi[-1] / 30.0) + 1):
+            ti = _cross_time(moon_phi, times, 30.0 * m)
+            if ti is None:
+                continue
+            sign = _SIGN_ABBREVS[m % 12]
+            ingresses.append((ti, sign))
+            lt = ti.astimezone(tz)
+            ingress_map[lt.date()] = (sign, lt.strftime("%H:%M"))
+
+        perfections.sort()
+        voc: set[date] = set()
+        voc_begin: dict[date, str] = {}
+        for ti, _sign in ingresses:
+            idx = bisect.bisect_left(perfections, ti)
+            if idx == 0:
+                continue
+            begin_local = perfections[idx - 1].astimezone(tz)
+            d, last = begin_local.date(), _local_date(ti)
+            voc_begin[d] = begin_local.strftime("%H:%M")  # local clock time
+            while d <= last:
+                voc.add(d)
+                d += timedelta(days=1)
+
+        return {"aspects": aspects_by_day, "voc": frozenset(voc),
+                "voc_begin": voc_begin, "ingress": ingress_map}
+    except Exception:
+        return empty
+
+
+def moon_aspects(day: date, location: "Location") -> list[MoonAspect]:
+    """Significant Moon-planet aspects that begin or end on ``day`` (local),
+    in chronological order."""
+    return _moon_month_events(day.year, day.month, location)["aspects"].get(
+        day, [])
+
+
+def moon_void_of_course(day: date, location: "Location") -> bool:
+    """Whether the Moon is void-of-course at any point during ``day`` (local)."""
+    return day in _moon_month_events(day.year, day.month, location)["voc"]
+
+
+def moon_void_begins(day: date, location: "Location") -> str | None:
+    """Local clock time ('HH:MM') a void-of-course period begins on ``day``, or
+    None if no void begins that day (the Moon may still be void from earlier)."""
+    return _moon_month_events(day.year, day.month, location)["voc_begin"].get(day)
+
+
+def moon_ingress_at(day: date, location: "Location") -> tuple[str, str] | None:
+    """(sign_abbrev, 'HH:MM') for the sign the Moon enters on ``day`` and the
+    local time it does so, or None if the Moon changes no sign that day. The
+    time is also when any void-of-course period ends."""
+    return _moon_month_events(day.year, day.month, location)["ingress"].get(day)

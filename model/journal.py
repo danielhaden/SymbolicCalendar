@@ -31,6 +31,7 @@ class Journal:
 
     def _save(self) -> None:
         try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(
                 json.dumps(self._entries, indent=2, ensure_ascii=False),
                 encoding="utf-8",

@@ -11,7 +11,7 @@ from PyInstaller.utils.hooks import collect_all
 
 # Version stamped into the bundle; the release workflow sets CALENDAR_VERSION
 # from the git tag so the .app version tracks the release.
-_VERSION = os.environ.get("CALENDAR_VERSION", "0.1.0")
+_VERSION = os.environ.get("CALENDAR_VERSION", "1.0.0")
 
 # Bundle our runtime assets (icon.png resolved via sys._MEIPASS at runtime).
 datas = [("assets", "assets")]

@@ -1,6 +1,6 @@
 name: Build macOS DMG
 
-# Push a version tag (e.g. v0.1.0) to build the app, package a DMG, and attach
+# Push a version tag (e.g. v1.0.0) to build the app, package a DMG, and attach
 # it to a GitHub Release. Manual runs build a DMG and upload it as a run
 # artifact instead (handy for testing without cutting a release).
 on:
@@ -31,7 +31,7 @@ jobs:
       - name: Resolve version
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            VERSION="${GITHUB_REF_NAME#v}"          # v0.1.0 -> 0.1.0
+            VERSION="${GITHUB_REF_NAME#v}"          # v1.0.0 -> 1.0.0
           else
             VERSION="0.0.0-${GITHUB_SHA::7}"        # dev build from a manual run
           fi

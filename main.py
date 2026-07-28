@@ -12,7 +12,7 @@ from ui import MainWindow
 from ui.theme import ThemeManager, global_stylesheet
 
 
-__version__ = "0.1.0"  # dev fallback; a packaged build reports its bundle version
+__version__ = "1.0.0"  # dev fallback; a packaged build reports its bundle version
 
 
 def _asset(name: str) -> str:

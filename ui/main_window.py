@@ -174,6 +174,11 @@ class MainWindow(QMainWindow):
         self._month_view = MonthView(
             self._model, self._theme, self._journal, self._events
         )
+        # Time-bar orientation is a persisted preference (Settings menu),
+        # defaulting to horizontal.
+        self._bars_horizontal = self._settings.value(
+            "view/bars_horizontal", True, type=bool)
+        self._month_view.set_bars_horizontal(self._bars_horizontal)
         # Central column: an (initially hidden) update banner over the month view.
         self._update_banner = _UpdateBanner(self._theme)
         central = QWidget()
@@ -218,9 +223,19 @@ class MainWindow(QMainWindow):
         data_action = settings_menu.addAction("Set calendar data folder…")
         data_action.triggered.connect(self._on_set_data_folder)
         settings_menu.addSeparator()
+        bars_action = settings_menu.addAction("Show time bars horizontally")
+        bars_action.setCheckable(True)
+        bars_action.setChecked(self._bars_horizontal)
+        bars_action.toggled.connect(self._on_toggle_bars_horizontal)
+        settings_menu.addSeparator()
         self._data_folder_action = settings_menu.addAction("")
         self._data_folder_action.setEnabled(False)  # a non-clickable label
         self._update_data_folder_label()
+
+    def _on_toggle_bars_horizontal(self, horizontal: bool) -> None:
+        self._bars_horizontal = horizontal
+        self._settings.setValue("view/bars_horizontal", horizontal)
+        self._month_view.set_bars_horizontal(horizontal)
 
     @staticmethod
     def _default_data_folder() -> str:

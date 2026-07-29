@@ -14,12 +14,28 @@ from pathlib import Path
 _DEFAULT_PATH = Path(__file__).resolve().parent.parent / "events.json"
 
 
+def _clamp01(value: object) -> float:
+    """Coerce ``value`` to a float in [0, 1] (canvas fraction), defaulting to
+    0.5 when it isn't a usable number."""
+    try:
+        return max(0.0, min(1.0, float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.5
+
+
 @dataclass
 class Event:
-    """A single calendar event: a canvas symbol plus editable details."""
+    """A single calendar event: free text placed on the day tile's canvas.
 
-    symbol: str
-    title: str = ""
+    ``text`` is the ≤20-char label shown on the canvas. ``x``/``y`` are the
+    box centre as fractions (0..1) of the canvas, so a dragged event returns to
+    the same spot when the month reloads. ``notes`` holds longer detail edited
+    in the expanded day view.
+    """
+
+    text: str
+    x: float = 0.5
+    y: float = 0.5
     notes: str = ""
 
 
@@ -43,10 +59,11 @@ class Events:
             events = []
             if isinstance(items, list):
                 for d in items:
-                    if isinstance(d, dict) and d.get("symbol"):
+                    if isinstance(d, dict) and d.get("text"):
                         events.append(Event(
-                            symbol=str(d["symbol"]),
-                            title=str(d.get("title", "")),
+                            text=str(d["text"]),
+                            x=_clamp01(d.get("x", 0.5)),
+                            y=_clamp01(d.get("y", 0.5)),
                             notes=str(d.get("notes", "")),
                         ))
             if events:
@@ -66,13 +83,21 @@ class Events:
         """The events for ``day`` (a copy of the list)."""
         return list(self._by_day.get(day.isoformat(), []))
 
-    def symbols(self, day: date) -> list[str]:
-        """Just the symbols for ``day`` (what the month canvas renders)."""
-        return [e.symbol for e in self._by_day.get(day.isoformat(), [])]
+    def texts(self, day: date) -> list[str]:
+        """Just the label text for ``day`` (what the month canvas renders)."""
+        return [e.text for e in self._by_day.get(day.isoformat(), [])]
 
     def add(self, day: date, event: Event) -> None:
         self._by_day.setdefault(day.isoformat(), []).append(event)
         self._save()
+
+    def move(self, day: date, index: int, x: float, y: float) -> None:
+        """Persist a new canvas position (fractions) for one event."""
+        events = self._by_day.get(day.isoformat())
+        if events and 0 <= index < len(events):
+            events[index].x = _clamp01(x)
+            events[index].y = _clamp01(y)
+            self._save()
 
     def update(self, day: date, index: int, event: Event) -> None:
         events = self._by_day.get(day.isoformat())

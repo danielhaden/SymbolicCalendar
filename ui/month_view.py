@@ -13,6 +13,7 @@ from datetime import date
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QPoint,
     QPointF,
     QPropertyAnimation,
     QRect,
@@ -22,11 +23,19 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QPushButton,
     QSizePolicy,
@@ -138,8 +147,10 @@ _EVENT_GLYPH_SIZE = 14.0
 # Canvas-border hover timing.
 _CANVAS_HOVER_DELAY_MS = 150
 _CANVAS_FADE_MS = 180
-# Placeholder glyph for a newly created event (symbol picking comes later).
-_DEFAULT_EVENT_GLYPH = "○"
+# Free-text event boxes placed on the grid-tile canvas.
+_EVENT_MAX_CHARS = 20    # hard cap on an event's label length
+_EVENT_TEXT_PX = 11.0    # unscaled pixel size of the label text
+_EVENT_BOX_PAD = 3.0     # padding inside an event's box, around the text
 
 
 def _moon_lit_path(cx: float, cy: float, r: float,
@@ -182,6 +193,27 @@ class JournalEdit(QTextEdit):
         menu.exec(event.globalPos())
 
 
+class EventEdit(QLineEdit):
+    """One-line editor for an event's on-canvas text. Commits on Enter or when
+    it loses focus (click-away); cancels on Escape."""
+
+    commit_requested = Signal()
+    cancel_requested = Signal()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.cancel_requested.emit()
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.commit_requested.emit()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self.commit_requested.emit()
+
+
 class DayCell(QPushButton):
     """A selectable day in the month grid.
 
@@ -195,8 +227,15 @@ class DayCell(QPushButton):
     daylight_hover_changed = Signal()
     # Emitted on left double-click, to expand this day to fill the month view.
     double_clicked = Signal()
-    # Emitted on right double-click within the canvas, to create an event.
-    event_create_requested = Signal()
+    # Emitted from the grid-tile canvas context menu to add an event at the
+    # given canvas-fraction position (x, y).
+    event_add_requested = Signal(float, float)
+    # Emitted on the grid tile to edit an event's text (index into the day).
+    event_edit_requested = Signal(int)
+    # Emitted after dragging an event box: (index, x, y) as canvas fractions.
+    event_moved = Signal(int, float, float)
+    # Emitted from the grid-tile context menu to delete an event (index).
+    event_delete_requested = Signal(int)
     # Emitted (expanded tile) on double-click of an event, to edit its note.
     event_note_requested = Signal(int)
     # Emitted (expanded tile) on any press, so an open inline editor can save.
@@ -291,7 +330,11 @@ class DayCell(QPushButton):
         self._canvas_anim.setDuration(_CANVAS_FADE_MS)
         self._canvas_anim.setEasingCurve(QEasingCurve.InOutQuad)
         self._canvas_anim.valueChanged.connect(self._on_canvas_anim)
-        self._events: list[Event] = []          # this day's events (symbol+notes)
+        self._events: list[Event] = []          # this day's events (text+notes)
+        # Drag state for moving an event box within the canvas (grid tiles).
+        self._drag_index: int | None = None
+        self._drag_offset = QPointF(0.0, 0.0)   # cursor -> box-centre offset
+        self._drag_moved = False
         # Seamless grid: every cell draws its left + bottom edge, so a tile's
         # bottom coincides with the horizontal gridline. Row 0 / the last
         # column add the outer top / right edges.
@@ -646,6 +689,56 @@ class DayCell(QPushButton):
                 return i
         return None
 
+    # -- grid-tile event boxes (free-text, draggable) --------------------
+    def _event_font(self) -> QFont:
+        font = QFont(self.font())
+        font.setPixelSize(max(1, round(_EVENT_TEXT_PX * self._paint_scale())))
+        return font
+
+    def _event_box_rect(self, index: int) -> QRectF:
+        """Grid-tile bounding box for event ``index``: centred at its stored
+        canvas fraction, sized to its text, and clamped so the whole box stays
+        within the canvas frame."""
+        canvas = self._canvas_rect()
+        e = self._events[index]
+        fm = QFontMetricsF(self._event_font())
+        pad = _EVENT_BOX_PAD * self._paint_scale()
+        bw = min(fm.horizontalAdvance(e.text or " ") + 2 * pad, canvas.width())
+        bh = min(fm.height() + 2 * pad, canvas.height())
+        cx = canvas.left() + e.x * canvas.width()
+        cy = canvas.top() + e.y * canvas.height()
+        left = min(max(cx - bw / 2, canvas.left()), canvas.right() - bw)
+        top = min(max(cy - bh / 2, canvas.top()), canvas.bottom() - bh)
+        return QRectF(left, top, bw, bh)
+
+    def _event_box_at(self, pos) -> int | None:
+        """Index of the grid-tile event box under ``pos`` (topmost first)."""
+        for i in reversed(range(len(self._events))):
+            if self._event_box_rect(i).contains(pos):
+                return i
+        return None
+
+    def _drag_event_to(self, pos) -> None:
+        """Move the dragged event box so its centre tracks ``pos`` (minus the
+        grab offset), clamped to keep the box within the canvas."""
+        i = self._drag_index
+        if i is None or not 0 <= i < len(self._events):
+            return
+        canvas = self._canvas_rect()
+        if canvas.width() <= 0 or canvas.height() <= 0:
+            return
+        box = self._event_box_rect(i)
+        bw, bh = box.width(), box.height()
+        cx = min(max(pos.x() - self._drag_offset.x(),
+                     canvas.left() + bw / 2), canvas.right() - bw / 2)
+        cy = min(max(pos.y() - self._drag_offset.y(),
+                     canvas.top() + bh / 2), canvas.bottom() - bh / 2)
+        e = self._events[i]
+        e.x = (cx - canvas.left()) / canvas.width()
+        e.y = (cy - canvas.top()) / canvas.height()
+        self._drag_moved = True
+        self.update()
+
     def _set_canvas_over(self, over: bool) -> None:
         """Track whether the cursor is over the canvas, with a delayed fade-in
         and a fade-out."""
@@ -743,6 +836,11 @@ class DayCell(QPushButton):
             self.update()
             event.accept()
             return
+        # No zoom/scroll over the event canvas — swallow the wheel there.
+        if self._date is not None and not self._standalone \
+                and self._canvas_rect().contains(event.position()):
+            event.accept()
+            return
         super().wheelEvent(event)
 
     def _draw_time_label(self, p: QPainter, t: Theme, text: str,
@@ -804,6 +902,9 @@ class DayCell(QPushButton):
                 self.update()
             return
         pos = event.position()
+        if self._drag_index is not None and (event.buttons() & Qt.LeftButton):
+            self._drag_event_to(pos)
+            return
         if self._bars_horizontal:
             # One per-cell hover: the whole bar strip reveals the day's times.
             self._set_bar_hover(self._bar_hover_region().contains(pos))
@@ -829,7 +930,30 @@ class DayCell(QPushButton):
             else:
                 self.outside_journal_clicked.emit()
             return  # consume; standalone tile isn't selectable
+        if event.button() == Qt.LeftButton and self._date is not None:
+            idx = self._event_box_at(event.position())
+            if idx is not None:
+                # Begin dragging this event box (don't select the day).
+                self._drag_index = idx
+                self._drag_moved = False
+                self._drag_offset = (event.position()
+                                     - self._event_box_rect(idx).center())
+                self.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._drag_index is not None:
+            idx = self._drag_index
+            self._drag_index = None
+            self.setCursor(Qt.PointingHandCursor)
+            if self._drag_moved and 0 <= idx < len(self._events):
+                e = self._events[idx]
+                self.event_moved.emit(idx, e.x, e.y)  # persist the new position
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
         if self._standalone:
@@ -839,19 +963,38 @@ class DayCell(QPushButton):
                     self.event_note_requested.emit(idx)  # edit this event's note
             super().mouseDoubleClickEvent(event)
             return
-        if self._date is not None:
-            if event.button() == Qt.LeftButton:
-                self.double_clicked.emit()       # expand to day view
-            elif event.button() == Qt.RightButton \
-                    and self._canvas_rect().contains(event.position()):
-                self.event_create_requested.emit()  # add an event to the canvas
+        if self._date is not None and event.button() == Qt.LeftButton:
+            idx = self._event_box_at(event.position())
+            if idx is not None:
+                self._drag_index = None  # cancel the drag the press just began
+                self.event_edit_requested.emit(idx)  # edit this event's text
+            else:
+                self.double_clicked.emit()           # expand to day view
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:
-        if not self._standalone:
-            return  # no context menu on grid tiles
+        if self._standalone:
+            menu = QMenu(self)
+            menu.addAction("Delete Entry", self.delete_journal_requested.emit)
+            menu.exec(event.globalPos())
+            return
+        # Grid tile: right-click inside the event canvas to add / delete events.
+        if self._date is None:
+            return
+        pos = QPointF(event.pos())
+        canvas = self._canvas_rect()
+        if not canvas.contains(pos):
+            return
         menu = QMenu(self)
-        menu.addAction("Delete Entry", self.delete_journal_requested.emit)
+        idx = self._event_box_at(pos)
+        if idx is not None:
+            menu.addAction("Delete Event",
+                           lambda: self.event_delete_requested.emit(idx))
+        else:
+            fx = (pos.x() - canvas.left()) / canvas.width()
+            fy = (pos.y() - canvas.top()) / canvas.height()
+            menu.addAction("Add Event",
+                           lambda: self.event_add_requested.emit(fx, fy))
         menu.exec(event.globalPos())
 
     def set_row_overlay(self, show_times: bool, is_hovered: bool = False) -> None:
@@ -1010,7 +1153,7 @@ class DayCell(QPushButton):
             p.drawRect(canvas)
             p.restore()
         if self._events and self._standalone:
-            # Expanded tile: a vertical list of events, each glyph with its note
+            # Expanded tile: a vertical list of events, each label with its note
             # text alongside. (Notes are never shown in the month grid.)
             gsize = _EVENT_GLYPH_SIZE * s
             gfont = QFont(self.font())
@@ -1021,30 +1164,31 @@ class DayCell(QPushButton):
                 e = self._events[i]
                 p.setFont(gfont)
                 p.setPen(QColor(t.TEXT))
-                p.drawText(grect, Qt.AlignCenter, e.symbol)
+                p.drawText(grect, Qt.AlignCenter, e.text)
                 if e.notes:
                     p.setFont(nfont)
                     p.setPen(QColor(t.TEXT_MUTED))
                     p.drawText(nrect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap,
                                e.notes)
         elif self._events:
-            # Month grid: glyphs only, flowing left-to-right and wrapping.
-            gsize = _EVENT_GLYPH_SIZE * s
-            gap = 3.0 * s
-            font = QFont(self.font())
-            font.setPixelSize(max(1, round(gsize)))
-            p.setFont(font)
-            p.setPen(QColor(t.TEXT))
-            ex, ey = canvas.left() + gap, canvas.top() + gap
-            for e in self._events:
-                if ex + gsize > canvas.right():
-                    ex = canvas.left() + gap
-                    ey += gsize + gap
-                if ey + gsize > canvas.bottom():
-                    break  # no room for more glyphs
-                p.drawText(QRectF(ex, ey, gsize, gsize),
-                           Qt.AlignCenter, e.symbol)
-                ex += gsize + gap
+            # Month grid: each event is a free-text box at its stored canvas
+            # position (draggable — see the mouse handlers). Clip to the canvas
+            # so a box never spills past the frame.
+            p.save()
+            p.setClipRect(canvas)
+            p.setFont(self._event_font())
+            for i, e in enumerate(self._events):
+                if not e.text:
+                    continue  # empty (being typed into the inline editor)
+                box = self._event_box_rect(i)
+                bg = QColor(t.BG_1)
+                bg.setAlpha(210)
+                p.setPen(Qt.NoPen)
+                p.setBrush(bg)
+                p.drawRoundedRect(box, 3, 3)
+                p.setPen(QColor(t.TEXT))
+                p.drawText(box, Qt.AlignCenter, e.text)
+            p.restore()
 
         # --- Top-right glyph: the zodiac sign on a day the Moon enters a new
         # sign, otherwise the moon-phase shape (crescent/quarter/gibbous/full).
@@ -1257,13 +1401,25 @@ class MonthView(QWidget):
         self._editing_journal = False
         self._journal_day = None
 
-        # Event-note editor: a small textbox shown next to an event's glyph in
+        # Event-note editor: a small textbox shown next to an event's label in
         # the expanded view; saves when the user clicks away.
         self._note_edit = QTextEdit(self)
         self._note_edit.setObjectName("noteEdit")
         self._note_edit.hide()
         self._editing_note_index: int | None = None
         self._note_day = None
+
+        # Inline event-text editor: a one-line box shown over an event's box on
+        # a month-grid tile; capped at 20 chars; commits on Enter / click-away.
+        self._event_edit = EventEdit(self)
+        self._event_edit.setObjectName("eventEdit")
+        self._event_edit.setMaxLength(_EVENT_MAX_CHARS)
+        self._event_edit.setAlignment(Qt.AlignCenter)
+        self._event_edit.hide()
+        self._event_edit.commit_requested.connect(self._commit_event_text)
+        self._event_edit.cancel_requested.connect(self._cancel_event_text)
+        # (cell, day, index) of the event currently being edited, or None.
+        self._event_editing: tuple[DayCell, date, int] | None = None
 
         self._model.month_changed.connect(lambda *_: self._refresh())
         self._model.selected_date_changed.connect(lambda *_: self._refresh())
@@ -1404,7 +1560,7 @@ class MonthView(QWidget):
         if 0 <= idx < len(events):
             e = events[idx]
             self._events.update(self._note_day, idx, Event(
-                symbol=e.symbol, title=e.title,
+                text=e.text, x=e.x, y=e.y,
                 notes=self._note_edit.toPlainText().strip()))
         self._editing_note_index = None
         self._note_edit.hide()
@@ -1422,6 +1578,9 @@ class MonthView(QWidget):
                 self._position_journal_edit()
             if self._editing_note_index is not None:
                 self._position_note_edit()
+        # A grid-tile event editor follows its cell as the grid reflows.
+        if self._event_editing is not None and not self._position_event_edit():
+            self._commit_event_text()
         super().resizeEvent(event)
 
     # -- construction ----------------------------------------------------
@@ -1473,19 +1632,111 @@ class MonthView(QWidget):
                 cell.clicked.connect(self._on_cell_clicked)
                 cell.daylight_hover_changed.connect(self._on_daylight_hover)
                 cell.double_clicked.connect(self._on_cell_double_clicked)
-                cell.event_create_requested.connect(self._on_event_create)
+                cell.event_add_requested.connect(self._on_event_add)
+                cell.event_edit_requested.connect(self._on_event_edit)
+                cell.event_moved.connect(self._on_event_moved)
+                cell.event_delete_requested.connect(self._on_event_delete)
                 grid.addWidget(cell, r, c)
                 self._cells.append(cell)
         return grid
 
-    def _on_event_create(self) -> None:
-        # Right double-click on a tile's canvas adds an event symbol, then
-        # opens the day view so its details can be edited.
+    # -- grid-tile events (free-text, draggable) -------------------------
+    def _on_event_add(self, x: float, y: float) -> None:
+        # "Add Event" from the canvas context menu: create an empty event at
+        # the clicked spot and open its inline editor for typing.
+        cell = self.sender()
+        if not isinstance(cell, DayCell) or cell.date is None:
+            return
+        self._events.add(cell.date, Event(text="", x=x, y=y))
+        self._refresh_events(cell, cell.date)
+        self._begin_event_edit(cell, cell.date, len(cell._events) - 1)
+
+    def _on_event_edit(self, index: int) -> None:
         cell = self.sender()
         if isinstance(cell, DayCell) and cell.date is not None:
-            self._events.add(cell.date, Event(symbol=_DEFAULT_EVENT_GLYPH))
-            self._refresh()
-            self._expand_cell(cell)
+            self._begin_event_edit(cell, cell.date, index)
+
+    def _on_event_moved(self, index: int, x: float, y: float) -> None:
+        cell = self.sender()
+        if isinstance(cell, DayCell) and cell.date is not None:
+            self._events.move(cell.date, index, x, y)
+
+    def _on_event_delete(self, index: int) -> None:
+        cell = self.sender()
+        if isinstance(cell, DayCell) and cell.date is not None:
+            self._events.remove(cell.date, index)
+            self._refresh_events(cell, cell.date)
+
+    def _refresh_events(self, cell: DayCell, day: date) -> None:
+        """Re-read one cell's events and repaint it (no full-grid rebuild)."""
+        cell._events = self._events.get(day)
+        cell.update()
+
+    def _begin_event_edit(self, cell: DayCell, day: date, index: int) -> None:
+        events = self._events.get(day)
+        if not 0 <= index < len(events):
+            return
+        if self._event_editing is not None:
+            self._commit_event_text()  # commit any editor already open
+        self._event_editing = (cell, day, index)
+        self._event_edit.setText(events[index].text)
+        if not self._position_event_edit():
+            self._event_editing = None
+            return
+        self._event_edit.show()
+        self._event_edit.raise_()
+        self._event_edit.setFocus()
+        self._event_edit.selectAll()
+
+    def _position_event_edit(self) -> bool:
+        """Place the one-line editor over the editing event's box. Returns False
+        if the cell/index is no longer valid."""
+        if self._event_editing is None:
+            return False
+        cell, _day, index = self._event_editing
+        if not (cell.isVisible() and 0 <= index < len(cell._events)):
+            return False
+        box = cell._event_box_rect(index)
+        origin = cell.mapTo(self, QPoint(0, 0))
+        w = max(64, int(box.width()) + 8)
+        h = max(20, int(box.height()) + 4)
+        x = int(origin.x() + box.center().x()) - w // 2
+        y = int(origin.y() + box.center().y()) - h // 2
+        x = max(0, min(x, self.width() - w))
+        y = max(0, min(y, self.height() - h))
+        self._event_edit.setGeometry(x, y, w, h)
+        return True
+
+    def _commit_event_text(self) -> None:
+        if self._event_editing is None:
+            return
+        cell, day, index = self._event_editing
+        self._event_editing = None       # clear first: hide() re-fires focus-out
+        self._event_edit.hide()
+        text = self._event_edit.text().strip()[:_EVENT_MAX_CHARS]
+        events = self._events.get(day)
+        if not 0 <= index < len(events):
+            return
+        if text:
+            e = events[index]
+            self._events.update(day, index,
+                                Event(text=text, x=e.x, y=e.y, notes=e.notes))
+        else:
+            self._events.remove(day, index)  # empty label -> discard the event
+        self._refresh_events(cell, day)
+
+    def _cancel_event_text(self) -> None:
+        if self._event_editing is None:
+            return
+        cell, day, index = self._event_editing
+        self._event_editing = None
+        self._event_edit.hide()
+        events = self._events.get(day)
+        # A brand-new (still-empty) event is dropped on cancel; edits to an
+        # existing label just revert.
+        if 0 <= index < len(events) and not events[index].text:
+            self._events.remove(day, index)
+        self._refresh_events(cell, day)
 
     # -- daylight hover: delayed appearance + smooth fade --------------------
     def _on_daylight_hover(self) -> None:
@@ -1767,6 +2018,8 @@ class MonthView(QWidget):
     def _refresh(self) -> None:
         if self._editing_note_index is not None:
             self._save_note()  # commit an open note before the grid rebuilds
+        if self._event_editing is not None:
+            self._commit_event_text()  # commit an open event label too
         self._dl_reset()  # drop any daylight-hover overlay from the old month
         self._title.setText(self._model.month_title())
         weeks = self._model.weeks()

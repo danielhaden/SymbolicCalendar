@@ -19,8 +19,9 @@ binaries = []
 hiddenimports = []
 
 # kerykeion ships ephemeris data (sweph/*.se1) and settings that must travel
-# with the frozen app; swisseph (pyswisseph) is a compiled extension.
-for pkg in ("kerykeion", "swisseph"):
+# with the frozen app; swisseph (pyswisseph) is a compiled extension; certifi
+# ships the CA bundle (cacert.pem) the update check verifies GitHub against.
+for pkg in ("kerykeion", "swisseph", "certifi"):
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
     datas += pkg_datas
     binaries += pkg_binaries

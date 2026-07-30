@@ -64,11 +64,11 @@ def _check_update() -> int:
     import urllib.error
     import urllib.request
 
-    from model.updates import GITHUB_REPO, check_for_update
+    from model.updates import GITHUB_REPO, check_for_update, ssl_context
 
     url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
     try:
-        with urllib.request.urlopen(url, timeout=6) as resp:
+        with urllib.request.urlopen(url, timeout=6, context=ssl_context()) as resp:
             print(f"check-update: reached GitHub (HTTP {resp.status}) — TLS OK")
     except urllib.error.HTTPError as exc:
         print(f"check-update: reached GitHub (HTTP {exc.code}) — TLS OK "

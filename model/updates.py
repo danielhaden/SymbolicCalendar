@@ -9,6 +9,7 @@ returns ``None``.
 from __future__ import annotations
 
 import json
+import ssl
 import urllib.request
 from dataclasses import dataclass
 
@@ -17,6 +18,24 @@ GITHUB_REPO = "danielhaden/SymbolicCalendar"
 
 _API = "https://api.github.com/repos/{repo}/releases/latest"
 _TIMEOUT = 6.0  # seconds; a launch-time check must fail fast when offline
+
+
+def ssl_context() -> ssl.SSLContext:
+    """A TLS context that verifies against certifi's CA bundle when available.
+
+    A packaged (PyInstaller) build has no access to the build machine's system
+    CA store, so the default OpenSSL cafile path is absent and HTTPS to GitHub
+    fails to verify. certifi ships its own ``cacert.pem`` (bundled into the app
+    and located at runtime via ``certifi.where()``), which includes the roots
+    GitHub chains to. Falls back to the system default when certifi is missing
+    (e.g. running from source).
+    """
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 
 @dataclass(frozen=True)
@@ -57,7 +76,8 @@ def latest_release(repo: str = GITHUB_REPO) -> Release | None:
                 "User-Agent": "SymbolicCalendar-update-check",
             },
         )
-        with urllib.request.urlopen(request, timeout=_TIMEOUT) as resp:
+        with urllib.request.urlopen(
+                request, timeout=_TIMEOUT, context=ssl_context()) as resp:
             data = json.load(resp)
     except Exception:
         return None

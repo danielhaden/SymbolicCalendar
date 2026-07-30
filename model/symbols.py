@@ -4,9 +4,10 @@ Typing ``#name`` while editing an event label opens a picker; the matches come
 from here. Each entry has a display ``char``, a primary ``name``, and optional
 extra ``keywords`` (including its set name, so e.g. ``#arrow`` lists the arrows).
 
-Sets so far: Greek letters, math/logic, arrows, and astrological glyphs. All are
-plain Unicode, so they render in the app's normal text pipeline with no bundled
-fonts. Add more by appending to a builder below — no UI change needed.
+Sets so far: Greek letters, math/logic, arrows, astrological glyphs, weather,
+and astronomy. All are plain Unicode, so they render in the app's normal text
+pipeline with no bundled fonts. Add more by appending a builder below — no UI
+change needed.
 """
 
 from __future__ import annotations
@@ -116,9 +117,37 @@ def _astro_symbols() -> list[Symbol]:
     return out
 
 
+def _weather_symbols() -> list[Symbol]:
+    data = (
+        ("sunny", "☀", ("sun", "clear")), ("cloudy", "☁", ("cloud",)),
+        ("partlycloudy", "⛅", ("cloud", "sun")), ("rain", "☔", ("umbrella", "rainy")),
+        ("umbrella", "☂", ("rain",)), ("snow", "❄", ("snowflake", "snowy")),
+        ("snowman", "☃", ("snow",)), ("lightning", "⚡", ("bolt", "thunder")),
+        ("thunderstorm", "☈", ("storm",)), ("storm", "⛈", ("rain", "thunder")),
+        ("sunshine", "☼", ("sun",)), ("celsius", "℃", ("temperature", "degrees")),
+        ("fahrenheit", "℉", ("temperature", "degrees")),
+    )
+    return [Symbol(ch + _VS, name, ("weather", *kw)) for name, ch, kw in data]
+
+
+def _astronomy_symbols() -> list[Symbol]:
+    data = (
+        ("newmoon", "○", ("moon", "new")), ("crescent", "☽", ("moon", "waxing")),
+        ("firstquarter", "◑", ("moon", "half", "waxing")),
+        ("fullmoon", "●", ("moon", "full")),
+        ("lastquarter", "◐", ("moon", "half", "waning")),
+        ("waningcrescent", "☾", ("moon", "waning")),
+        ("whitestar", "☆", ("star", "outline")), ("sparkle", "✦", ("star",)),
+        ("sparkleoutline", "✧", ("star",)), ("sixstar", "✶", ("star",)),
+        ("asterism", "⁂", ("stars",)),
+    )
+    return [Symbol(ch + _VS, name, ("astronomy", *kw)) for name, ch, kw in data]
+
+
 # The active library. Extend by appending more builders' output here.
 SYMBOLS: list[Symbol] = (
     _greek_symbols() + _math_symbols() + _arrow_symbols() + _astro_symbols()
+    + _weather_symbols() + _astronomy_symbols()
 )
 
 

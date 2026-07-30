@@ -164,6 +164,43 @@ def _chart_planets(day: date, location: "Location") -> dict | None:
         return None
 
 
+# Bodies eligible for the ascendant band, luminaries first then the planets.
+_ASC_BODIES = (
+    "sun", "moon", "mercury", "venus", "mars",
+    "jupiter", "saturn", "uranus", "neptune", "pluto",
+)
+
+
+@lru_cache(maxsize=2048)
+def planets_in_signs(day: date, location: "Location") -> dict[int, tuple[str, ...]]:
+    """Bodies grouped by the zodiac sign they occupy at local midnight.
+
+    Returns a map of sign index (0..11, 0 = Aries) -> the body keys whose
+    ecliptic longitude falls in that sign, ordered by longitude (earliest
+    degree first). Feeds the ascendant band, which stacks each sign's planets
+    beneath its glyph. Empty when kerykeion is unavailable.
+    """
+    if not _KERYKEION_AVAILABLE:
+        return {}
+    try:
+        subject = AstrologicalSubject(
+            "ascendant-planets", day.year, day.month, day.day, 0, 0,
+            lng=location.longitude, lat=location.latitude,
+            tz_str=location.tz_name, city=location.name, online=False,
+        )
+    except Exception:
+        return {}
+    by_sign: dict[int, list[tuple[float, str]]] = {}
+    for body in _ASC_BODIES:
+        try:
+            pos = float(getattr(subject, body).abs_pos) % 360.0
+        except Exception:
+            continue
+        by_sign.setdefault(int(pos // 30.0) % 12, []).append((pos, body))
+    return {idx: tuple(b for _, b in sorted(items))
+            for idx, items in by_sign.items()}
+
+
 def planet_ingress(planet: str, day: date, location: "Location") -> str | None:
     """The zodiac sign ``planet`` enters on ``day`` (local time), or None.
 

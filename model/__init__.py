@@ -14,6 +14,7 @@ from .lunation import (
     moon_void_of_course,
     planet_ingress,
     planet_station,
+    planets_in_signs,
     venus_ingress,
 )
 from .daylight import (
@@ -43,6 +44,7 @@ __all__ = [
     "venus_ingress",
     "planet_ingress",
     "planet_station",
+    "planets_in_signs",
     "Daylight",
     "Location",
     "Moonlight",

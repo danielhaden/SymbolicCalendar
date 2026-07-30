@@ -63,6 +63,7 @@ from model import (
     moonlight,
     planet_ingress,
     planet_station,
+    planets_in_signs,
 )
 from .theme import Theme, ThemeManager
 
@@ -94,6 +95,8 @@ PLANETS = [
     ("pluto", "Pluto", "♇"),
 ]
 _PLANET_GLYPHS = {key: glyph + _VS_TEXT for key, _, glyph in PLANETS}
+# Bodies shown stacked in the ascendant band: the luminaries plus the planets.
+_BODY_GLYPHS = {"sun": "☉" + _VS_TEXT, "moon": "☽" + _VS_TEXT, **_PLANET_GLYPHS}
 
 # Retrograde station arrows: left when a planet stations retrograde, right
 # when it stations direct (drawn under the planet glyph).
@@ -117,7 +120,13 @@ _ASPECT_GLYPHS = {
 # they read apart by direction — and where they overlap the hatches cross.
 _DAYLIGHT_X = 0.0
 _BAR_W = 10.0             # strip thickness (both bars share it)
-_ASC_W = 10.0            # ascendant-band thickness (very bottom edge)
+# Ascendant band: a sign glyph straddling the band's top line, with that sign's
+# planets stacked beneath it. The band grows to fit the busiest sign that day.
+_ASC_SIGN_PX = 11.0      # zodiac glyph size (sits on the band's top line)
+_ASC_PLANET_PX = 8.5     # stacked planet/luminary glyph size
+_ASC_ROW = 10.0          # vertical pitch per stacked planet
+_ASC_GLYPH_GAP = 2.5     # gap below the sign glyph before the first planet
+_ASC_BOTTOM_PAD = 2.5    # padding below the last planet
 _BAR_HATCH_GAP = 4.6      # spacing between hatch lines (larger = sparser)
 _BAR_HATCH_WIDTH = 1.8    # hatch line thickness
 _BAR_BORDER_WIDTH = 0.6   # bar outline thickness
@@ -150,13 +159,16 @@ _MOON_RADIUS = 4.5
 _CANVAS_TOP = 30.0      # below the number / moon header
 _CANVAS_MARGIN = 4.0    # gap from the tile's right / bottom edges
 _CANVAS_PAD = 3.0       # padding so the box doesn't touch other elements
-_EVENT_GLYPH_SIZE = 14.0
+# Expanded-tile event list: a text column with the note alongside it.
+_EVENT_ROW_H = 24.0     # height of one event row
+_EVENT_TEXT_SIZE = 14.0  # event-text size in the expanded list
+_EVENT_TEXT_COL = 200.0  # max width of the text column (note sits to its right)
 # Canvas-border hover timing.
 _CANVAS_HOVER_DELAY_MS = 150
 _CANVAS_FADE_MS = 180
 # Free-text event boxes placed on the grid-tile canvas.
 _EVENT_MAX_CHARS = 20    # hard cap on an event's label length
-_EVENT_TEXT_PX = 11.0    # unscaled pixel size of the label text
+_EVENT_TEXT_PX = 9.5     # unscaled pixel size of the label text
 _EVENT_BOX_PAD = 3.0     # padding inside an event's box, around the text
 
 
@@ -306,6 +318,9 @@ class DayCell(QPushButton):
         # Ascendant band: the rising zodiac sign across the day, a strip of up
         # to 12 sign blocks along the very bottom edge (24h maps left->right).
         self._ascendant: Ascendant | None = None
+        # sign index -> that sign's bodies (stacked in the band); busiest sign
+        # sets the band's height for the day.
+        self._asc_planets: dict[int, tuple[str, ...]] = {}
         self._show_ascendant = True    # View menu toggle
         # Orientation of both time bars: True = horizontal (bottom edge, 24h
         # maps left->right, the default); False = vertical (left edge, top->
@@ -351,6 +366,7 @@ class DayCell(QPushButton):
         # column add the outer top / right edges.
         self._draw_top = False
         self._draw_right = False
+        self._first_col = False   # leftmost column: keep its full outer edge
 
     @property
     def date(self) -> date | None:
@@ -372,6 +388,7 @@ class DayCell(QPushButton):
         daylight: Daylight | None,
         moonlight: Moonlight | None,
         ascendant: Ascendant | None,
+        asc_planets: dict[int, tuple[str, ...]],
         moon_labels: list[tuple[str | None, str | None]],
         has_journal: bool,
         events: list[Event],
@@ -391,6 +408,7 @@ class DayCell(QPushButton):
         self._daylight = daylight
         self._moonlight = moonlight
         self._ascendant = ascendant
+        self._asc_planets = asc_planets
         self._moon_labels = moon_labels
         self._moon_hover_anim.stop()
         self._moon_hover_seg = None
@@ -403,9 +421,11 @@ class DayCell(QPushButton):
         self._events = events
         self.update()
 
-    def set_grid_edges(self, *, top: bool, right: bool) -> None:
+    def set_grid_edges(self, *, top: bool, right: bool,
+                       first_col: bool = False) -> None:
         self._draw_top = top
         self._draw_right = right
+        self._first_col = first_col
         self.update()
 
     def set_theme(self, theme: Theme) -> None:
@@ -414,7 +434,10 @@ class DayCell(QPushButton):
 
     def _bars_thickness(self) -> float:
         """Unscaled thickness of the shared bar strip (0 when both are hidden;
-        the daylight and moon bars overlap within this one strip)."""
+        the daylight and moon bars overlap within this one strip). The expanded
+        tile carries no astro elements, so it reserves nothing."""
+        if self._standalone:
+            return 0.0
         return _BAR_W if (self._show_daylight or self._show_moon_bar) else 0.0
 
     def _bars_width(self) -> float:
@@ -425,12 +448,30 @@ class DayCell(QPushButton):
         """Unscaled height the bottom-edge bars reserve (0 when vertical)."""
         return self._bars_thickness() if self._bars_horizontal else 0.0
 
+    def _asc_planet_max(self) -> int:
+        """Most planets any single sign holds this day (sets the band height)."""
+        if not self._asc_planets:
+            return 0
+        return max((len(v) for v in self._asc_planets.values()), default=0)
+
+    def _asc_band_body(self) -> float:
+        """Scaled height of the filled band below its top line: the sign glyph's
+        lower half, plus a stacked row for each planet in the busiest sign."""
+        s = self._paint_scale()
+        body = _ASC_SIGN_PX * 0.5 + _ASC_BOTTOM_PAD
+        n = self._asc_planet_max()
+        if n > 0:
+            body += _ASC_GLYPH_GAP + n * _ASC_ROW
+        return body * s
+
     def _asc_height(self) -> float:
-        """Scaled thickness the ascendant band reserves at the very bottom edge
-        (0 when hidden or there's no data for the day)."""
-        if self._show_ascendant and self._ascendant is not None:
-            return _ASC_W * self._paint_scale()
-        return 0.0
+        """Scaled height reserved at the very bottom for the ascendant band —
+        the filled body plus the sign glyph's upper half straddling the top
+        line. 0 when hidden, on the expanded tile, or there's no data."""
+        if self._standalone or not (self._show_ascendant
+                                    and self._ascendant is not None):
+            return 0.0
+        return self._asc_band_body() + _ASC_SIGN_PX * 0.5 * self._paint_scale()
 
     def _time_axis_bottom(self) -> float:
         """Y of the 24h time axis's bottom — above the ascendant band, so the
@@ -441,7 +482,7 @@ class DayCell(QPushButton):
         """The daylight bar's rectangle, or None when hidden / no data. It runs
         along the left edge (vertical) or the bottom edge (horizontal), with
         dawn..dusk mapped onto the tile's 24h time axis."""
-        if not self._show_daylight or self._daylight is None:
+        if self._standalone or not self._show_daylight or self._daylight is None:
             return None
         thick = _BAR_W * self._paint_scale()
         d0 = self._daylight.dawn_fraction
@@ -484,7 +525,7 @@ class DayCell(QPushButton):
     def _moonbar_rects(self) -> list[QRectF]:
         """The Moon's above-horizon span(s) as rectangles, sharing the daylight
         bar's strip (two rects when a span crosses midnight)."""
-        if not self._show_moon_bar or self._moonlight is None:
+        if self._standalone or not self._show_moon_bar or self._moonlight is None:
             return []
         thick = _BAR_W * self._paint_scale()
         if self._bars_horizontal:
@@ -664,49 +705,107 @@ class DayCell(QPushButton):
         p.restore()
 
     def _draw_ascendant(self, p: QPainter, t: Theme) -> None:
-        """Draw the rising-sign band along the very bottom edge: up to 12 sign
-        blocks across the day's 24h (left = local midnight), thin cusp dividers,
-        and each block's sign glyph where it fits."""
-        asc_h = self._asc_height()
-        if asc_h <= 0.0 or self._ascendant is None:
+        """Draw the rising-sign band along the very bottom edge: each sign's
+        glyph straddling the band's top line, with that sign's planets stacked
+        beneath it, split across the day's 24h (left = local midnight)."""
+        if self._asc_height() <= 0.0 or self._ascendant is None:
             return
         s = self._paint_scale()
         w = self.width()
-        top = self.height() - asc_h
+        body_h = self._asc_band_body()
+        line_y = self.height() - body_h          # top line; the sign glyph sits on it
+        overhang = _ASC_SIGN_PX * 0.5 * s        # the glyph's half above the line
         dim = not self._in_month
         segments = self._ascendant.segments
-        # Faint alternating fill so adjacent blocks read apart in greyscale.
+        n = len(segments)
+        # The midnight-split sign occupies both the first and last (partial)
+        # chips; draw its glyph/planets once, in the wider half.
+        skip = -1
+        if n >= 2 and segments[0][2] == segments[-1][2]:
+            head_w = segments[0][1] - segments[0][0]
+            tail_w = segments[-1][1] - segments[-1][0]
+            skip = (n - 1) if head_w >= tail_w else 0
+
         fills = (QColor(t.DAYLIGHT), QColor(t.DAYLIGHT))
         fills[0].setAlpha(20 if dim else 40)
         fills[1].setAlpha(40 if dim else 78)
-        glyph_col = QColor(t.TEXT_MUTED)
-        if dim:
-            glyph_col.setAlpha(120)
-        font = QFont(self.font())
-        font.setPixelSize(max(1, round(_ASC_W * 0.9 * s)))
-        p.save()
-        p.setClipRect(QRectF(0.0, top, w, asc_h))
-        p.setFont(font)
-        fm = p.fontMetrics()
-        for idx, (a, b, sign) in enumerate(segments):
-            rect = QRectF(a * w, top, (b - a) * w, asc_h)
-            p.setPen(Qt.NoPen)
-            p.setBrush(fills[idx % 2])
-            p.drawRect(rect)
-            glyph = _ZODIAC_GLYPHS[sign]
-            if rect.width() >= fm.horizontalAdvance(glyph) + 2.0 * s:
-                p.setPen(glyph_col)
-                p.drawText(rect, Qt.AlignCenter, glyph)
-        # Thin dividers at each internal cusp, and a top border.
+        sign_col = QColor(t.TEXT_MUTED)
+        body_col = QColor(t.TEXT)
         div = QColor(t.TEXT_FAINT)
         div.setAlpha(90 if dim else 160)
+        if dim:
+            sign_col.setAlpha(120)
+            body_col.setAlpha(150)
+        sign_font = QFont(self.font())
+        sign_font.setPixelSize(max(1, round(_ASC_SIGN_PX * s)))
+        planet_font = QFont(self.font())
+        planet_font.setPixelSize(max(1, round(_ASC_PLANET_PX * s)))
+        sfm = QFontMetricsF(sign_font)
+        pfm = QFontMetricsF(planet_font)
+
+        p.save()
+        p.setClipRect(QRectF(0.0, line_y - overhang, w, self.height() - line_y + overhang))
+
+        # 1) Alternating fills so adjacent blocks read apart in greyscale.
+        p.setPen(Qt.NoPen)
+        for idx, (a, b, _sign) in enumerate(segments):
+            p.setBrush(fills[idx % 2])
+            p.drawRect(QRectF(a * w, line_y, (b - a) * w, body_h))
+
+        # 2) Thin dividers at each internal cusp (the split chip's own edge at
+        #    x=0/x=w is intentionally left open so its fill bridges the tile).
         pen = QPen(div)
         pen.setWidthF(_BAR_BORDER_WIDTH)
         pen.setCosmetic(True)
         p.setPen(pen)
         for (a, _b, _sign) in segments[1:]:
-            p.drawLine(QPointF(a * w, top), QPointF(a * w, self.height()))
-        p.drawLine(QPointF(0.0, top), QPointF(w, top))
+            p.drawLine(QPointF(a * w, line_y), QPointF(a * w, self.height()))
+
+        # 3) Sign glyphs on the line + stacked planets; remember where each glyph
+        #    covers the line so it can be drawn "broken" around them.
+        gaps: list[tuple[float, float]] = []
+        for idx, (a, b, sign) in enumerate(segments):
+            if idx == skip:
+                continue
+            cx0, cw = a * w, (b - a) * w
+            if cw <= 1.0:
+                continue
+            glyph = _ZODIAC_GLYPHS[sign]
+            gw = sfm.horizontalAdvance(glyph)
+            if cw >= gw * 0.55:
+                p.save()
+                p.setClipRect(QRectF(cx0, line_y - overhang - 1.0, cw,
+                                     _ASC_SIGN_PX * s + 2.0))
+                p.setFont(sign_font)
+                p.setPen(sign_col)
+                p.drawText(QRectF(cx0, line_y - overhang, cw, _ASC_SIGN_PX * s),
+                           Qt.AlignCenter, glyph)
+                p.restore()
+                mid = cx0 + cw / 2.0
+                gaps.append((mid - gw / 2.0 - 1.0, mid + gw / 2.0 + 1.0))
+            bodies = self._asc_planets.get(sign, ())
+            if bodies and cw >= pfm.horizontalAdvance("♀") * 0.55:
+                p.save()
+                p.setClipRect(QRectF(cx0, line_y, cw, body_h))
+                p.setFont(planet_font)
+                p.setPen(body_col)
+                y = line_y + overhang + _ASC_GLYPH_GAP * s
+                for body in bodies:
+                    p.drawText(QRectF(cx0, y, cw, _ASC_ROW * s), Qt.AlignCenter,
+                               _BODY_GLYPHS.get(body, ""))
+                    y += _ASC_ROW * s
+                p.restore()
+
+        # 4) The top line, broken where a sign glyph sits on it.
+        p.setPen(pen)
+        gaps.sort()
+        x = 0.0
+        for g0, g1 in gaps:
+            if g0 > x:
+                p.drawLine(QPointF(x, line_y), QPointF(g0, line_y))
+            x = max(x, g1)
+        if x < w:
+            p.drawLine(QPointF(x, line_y), QPointF(w, line_y))
         p.restore()
 
     def _canvas_rect(self) -> QRectF:
@@ -734,29 +833,30 @@ class DayCell(QPushButton):
         return rect.adjusted(pad, pad, -pad, -pad)
 
     def _event_layout(self) -> list[tuple[int, QRectF, QRectF]]:
-        """Expanded-tile event rows: (index, glyph_rect, note_rect) laid out as
-        a vertical list within the canvas. Empty for grid tiles."""
+        """Expanded-tile event rows: (index, text_rect, note_rect) laid out as
+        a vertical list within the canvas — the event's text in a left column
+        with its note alongside. Empty for grid tiles."""
         if not self._standalone or not self._events:
             return []
         s = self._paint_scale()
         canvas = self._canvas_rect()
-        gsize = _EVENT_GLYPH_SIZE * s
-        gap = 6.0 * s
-        row_h = gsize + 8.0 * s
+        row_h = _EVENT_ROW_H * s
+        gap = 8.0 * s
+        text_w = min(canvas.width() * 0.6, _EVENT_TEXT_COL * s)
         rows = []
         y = canvas.top()
         for i in range(len(self._events)):
             if y + row_h > canvas.bottom():
                 break  # no room for more rows
-            grect = QRectF(canvas.left(), y, gsize, row_h)
-            nx = canvas.left() + gsize + gap
+            trect = QRectF(canvas.left(), y, text_w, row_h)
+            nx = canvas.left() + text_w + gap
             nrect = QRectF(nx, y, max(0.0, canvas.right() - nx), row_h)
-            rows.append((i, grect, nrect))
+            rows.append((i, trect, nrect))
             y += row_h + gap
         return rows
 
     def _event_at(self, pos) -> int | None:
-        """Index of the expanded-tile event row (glyph or note) under ``pos``."""
+        """Index of the expanded-tile event row (text or note) under ``pos``."""
         for i, grect, nrect in self._event_layout():
             if grect.united(nrect).contains(pos):
                 return i
@@ -1115,6 +1215,7 @@ class DayCell(QPushButton):
         self._moonlight = other._moonlight
         self._show_moon_bar = other._show_moon_bar
         self._ascendant = other._ascendant
+        self._asc_planets = other._asc_planets
         self._show_ascendant = other._show_ascendant
         self._bars_horizontal = other._bars_horizontal
         self._moon_labels = other._moon_labels
@@ -1171,9 +1272,16 @@ class DayCell(QPushButton):
             grid_pen.setCosmetic(True)
             p.setPen(grid_pen)
             # Left + bottom always; drawing the bottom as the cell's own edge
-            # makes the tile bottom coincide with the gridline.
-            p.drawLine(QPointF(0.5, 0), QPointF(0.5, h))          # left
-            p.drawLine(QPointF(0, h - 0.5), QPointF(w, h - 0.5))  # bottom
+            # makes the tile bottom coincide with the gridline. On inner columns
+            # the left edge stops above the ascendant band so a sign block that
+            # straddles midnight bridges the boundary into the previous day.
+            left_bottom = h
+            if not self._first_col:
+                asc_h = self._asc_height()
+                if asc_h > 0.0:
+                    left_bottom = h - asc_h
+            p.drawLine(QPointF(0.5, 0), QPointF(0.5, left_bottom))  # left
+            p.drawLine(QPointF(0, h - 0.5), QPointF(w, h - 0.5))    # bottom
             if self._draw_top:
                 p.drawLine(QPointF(0, 0.5), QPointF(w, 0.5))      # outer top
             if self._draw_right:
@@ -1237,18 +1345,17 @@ class DayCell(QPushButton):
             p.drawRect(canvas)
             p.restore()
         if self._events and self._standalone:
-            # Expanded tile: a vertical list of events, each label with its note
-            # text alongside. (Notes are never shown in the month grid.)
-            gsize = _EVENT_GLYPH_SIZE * s
-            gfont = QFont(self.font())
-            gfont.setPixelSize(max(1, round(gsize)))
+            # Expanded tile: a vertical list of events, each showing its full
+            # text with its note alongside. (Notes are never shown in the grid.)
+            tfont = QFont(self.font())
+            tfont.setPixelSize(max(1, round(_EVENT_TEXT_SIZE * s)))
             nfont = QFont(self.font())
             nfont.setPixelSize(max(1, round(12 * s)))
-            for i, grect, nrect in self._event_layout():
+            for i, trect, nrect in self._event_layout():
                 e = self._events[i]
-                p.setFont(gfont)
+                p.setFont(tfont)
                 p.setPen(QColor(t.TEXT))
-                p.drawText(grect, Qt.AlignCenter, e.text)
+                p.drawText(trect, Qt.AlignLeft | Qt.AlignVCenter, e.text)
                 if e.notes:
                     p.setFont(nfont)
                     p.setPen(QColor(t.TEXT_MUTED))
@@ -1281,7 +1388,7 @@ class DayCell(QPushButton):
         base.setAlpha(full_alpha)
         cx, cy, r = w - 11.0 * s, 17.0 * s, _MOON_RADIUS * s
 
-        if self._ingress_sign is not None:
+        if not self._standalone and self._ingress_sign is not None:
             glyph = _SIGN_GLYPHS.get(self._ingress_sign)
             if glyph:
                 font = QFont(self.font())
@@ -1298,7 +1405,7 @@ class DayCell(QPushButton):
                     p.setFont(tfont)
                     p.drawText(QRectF(0, cy - 9 * s, cx - 11 * s, 18 * s),
                                Qt.AlignRight | Qt.AlignVCenter, self._ingress_time)
-        elif self._lunation is not None:
+        elif not self._standalone and self._lunation is not None:
             # Faint full-disc outline marks the unlit limb (visible at new moon).
             outline = QColor(t.MOON)
             outline.setAlpha(int(full_alpha * 0.45))
@@ -1324,7 +1431,7 @@ class DayCell(QPushButton):
         # no scrollbar); drawing is clipped to the strip so it never spills onto
         # the journal corner or other elements. ---
         marks = self._visible_marks()
-        if marks:
+        if marks and not self._standalone:
             self._clamp_marks_scroll()  # stay valid as the day's marks change
             mrect = self._marks_rect()
             right = QRectF(2, 0, w - 5 * s, 13 * s)
@@ -2137,10 +2244,12 @@ class MonthView(QWidget):
                     daylight=daylight(day),
                     moonlight=moonlight(day),
                     ascendant=ascendant(day, location),
+                    asc_planets=planets_in_signs(day, location),
                     moon_labels=self._moon_span_labels(day),
                     has_journal=self._journal.has(day),
                     events=self._events.get(day),
                 )
-                cell.set_grid_edges(top=(row == 0), right=(col == 6))
+                cell.set_grid_edges(top=(row == 0), right=(col == 6),
+                                    first_col=(col == 0))
             else:
                 cell.setVisible(False)

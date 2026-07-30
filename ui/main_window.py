@@ -285,6 +285,11 @@ class MainWindow(QMainWindow):
         moonbar_action.setChecked(True)
         moonbar_action.toggled.connect(self._month_view.set_moon_bar_visible)
 
+        ascendant_action = view_menu.addAction("Show Ascendant")
+        ascendant_action.setCheckable(True)
+        ascendant_action.setChecked(True)
+        ascendant_action.toggled.connect(self._month_view.set_ascendant_visible)
+
         aspects_action = view_menu.addAction("Show Moon Aspects")
         aspects_action.setCheckable(True)
         aspects_action.setChecked(True)

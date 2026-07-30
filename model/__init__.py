@@ -25,6 +25,7 @@ from .daylight import (
     moonlight,
     set_current_location,
 )
+from .ascendant import Ascendant, ascendant
 
 __all__ = [
     "CalendarModel",
@@ -49,4 +50,6 @@ __all__ = [
     "moonlight",
     "current_location",
     "set_current_location",
+    "Ascendant",
+    "ascendant",
 ]

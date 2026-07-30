@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from model import (
+    Ascendant,
     CalendarModel,
     Daylight,
     Event,
@@ -52,6 +53,7 @@ from model import (
     Journal,
     Lunation,
     Moonlight,
+    ascendant,
     current_location,
     daylight,
     moon_aspects,
@@ -75,6 +77,10 @@ _SIGN_GLYPHS = {
     "Lib": "♎" + _VS_TEXT, "Sco": "♏" + _VS_TEXT, "Sag": "♐" + _VS_TEXT,
     "Cap": "♑" + _VS_TEXT, "Aqu": "♒" + _VS_TEXT, "Pis": "♓" + _VS_TEXT,
 }
+# The same glyphs indexed 0..11 from 0° Aries, for the ascendant band.
+_ZODIAC_GLYPHS = tuple(_SIGN_GLYPHS[a] for a in (
+    "Ari", "Tau", "Gem", "Can", "Leo", "Vir",
+    "Lib", "Sco", "Sag", "Cap", "Aqu", "Pis"))
 # Planets whose sign ingresses can be marked, each toggleable in the View
 # menu. (kerykeion key, display name, glyph) in traditional order.
 PLANETS = [
@@ -111,6 +117,7 @@ _ASPECT_GLYPHS = {
 # they read apart by direction — and where they overlap the hatches cross.
 _DAYLIGHT_X = 0.0
 _BAR_W = 10.0             # strip thickness (both bars share it)
+_ASC_W = 10.0            # ascendant-band thickness (very bottom edge)
 _BAR_HATCH_GAP = 4.6      # spacing between hatch lines (larger = sparser)
 _BAR_HATCH_WIDTH = 1.8    # hatch line thickness
 _BAR_BORDER_WIDTH = 0.6   # bar outline thickness
@@ -296,6 +303,10 @@ class DayCell(QPushButton):
         # second left-edge bar, toggled independently of the daylight bar.
         self._moonlight: Moonlight | None = None
         self._show_moon_bar = True
+        # Ascendant band: the rising zodiac sign across the day, a strip of up
+        # to 12 sign blocks along the very bottom edge (24h maps left->right).
+        self._ascendant: Ascendant | None = None
+        self._show_ascendant = True    # View menu toggle
         # Orientation of both time bars: True = horizontal (bottom edge, 24h
         # maps left->right, the default); False = vertical (left edge, top->
         # bottom). A persisted Settings preference drives it.
@@ -360,6 +371,7 @@ class DayCell(QPushButton):
         void_begins: str | None,
         daylight: Daylight | None,
         moonlight: Moonlight | None,
+        ascendant: Ascendant | None,
         moon_labels: list[tuple[str | None, str | None]],
         has_journal: bool,
         events: list[Event],
@@ -378,6 +390,7 @@ class DayCell(QPushButton):
         self._marks_scroll = 0.0
         self._daylight = daylight
         self._moonlight = moonlight
+        self._ascendant = ascendant
         self._moon_labels = moon_labels
         self._moon_hover_anim.stop()
         self._moon_hover_seg = None
@@ -412,6 +425,18 @@ class DayCell(QPushButton):
         """Unscaled height the bottom-edge bars reserve (0 when vertical)."""
         return self._bars_thickness() if self._bars_horizontal else 0.0
 
+    def _asc_height(self) -> float:
+        """Scaled thickness the ascendant band reserves at the very bottom edge
+        (0 when hidden or there's no data for the day)."""
+        if self._show_ascendant and self._ascendant is not None:
+            return _ASC_W * self._paint_scale()
+        return 0.0
+
+    def _time_axis_bottom(self) -> float:
+        """Y of the 24h time axis's bottom — above the ascendant band, so the
+        daylight/moon bars stack on top of it."""
+        return self.height() - self._asc_height()
+
     def _daylight_rect(self) -> QRectF | None:
         """The daylight bar's rectangle, or None when hidden / no data. It runs
         along the left edge (vertical) or the bottom edge (horizontal), with
@@ -423,8 +448,9 @@ class DayCell(QPushButton):
         d1 = self._daylight.dusk_fraction
         if self._bars_horizontal:
             w = self.width()
-            return QRectF(d0 * w, self.height() - thick, (d1 - d0) * w, thick)
-        h = self.height()
+            return QRectF(d0 * w, self._time_axis_bottom() - thick,
+                          (d1 - d0) * w, thick)
+        h = self._time_axis_bottom()
         return QRectF(_DAYLIGHT_X, d0 * h, thick, (d1 - d0) * h)
 
     def _moon_spans_px(self, axis_len: float) -> list[tuple[float, float]]:
@@ -462,11 +488,11 @@ class DayCell(QPushButton):
             return []
         thick = _BAR_W * self._paint_scale()
         if self._bars_horizontal:
-            y = self.height() - thick
+            y = self._time_axis_bottom() - thick
             return [QRectF(lo, y, hi - lo, thick)
                     for (lo, hi) in self._moon_spans_px(self.width())]
         return [QRectF(_DAYLIGHT_X, lo, thick, hi - lo)
-                for (lo, hi) in self._moon_spans_px(self.height())]
+                for (lo, hi) in self._moon_spans_px(self._time_axis_bottom())]
 
     def _draw_hatch(self, p: QPainter, rect: QRectF, color: QColor,
                     gap: float, width: float, forward: bool = True) -> None:
@@ -548,7 +574,7 @@ class DayCell(QPushButton):
         if not (self._show_daylight or self._show_moon_bar):
             return QRectF()
         thick = _BAR_W * self._paint_scale()
-        return QRectF(0.0, self.height() - thick, self.width(), thick)
+        return QRectF(0.0, self._time_axis_bottom() - thick, self.width(), thick)
 
     def _bar_events(self) -> list[tuple[float, str]]:
         """(time-fraction, clock label) for this day's dawn, dusk, moonrise and
@@ -594,7 +620,7 @@ class DayCell(QPushButton):
             return
         s = self._paint_scale()
         w = self.width()
-        bar_top = self.height() - _BAR_W * s
+        bar_top = self._time_axis_bottom() - _BAR_W * s
         font = QFont(self.font())
         font.setPixelSize(max(1, round(10 * s)))
         p.setFont(font)
@@ -637,6 +663,52 @@ class DayCell(QPushButton):
             p.drawText(chip, Qt.AlignCenter, text)
         p.restore()
 
+    def _draw_ascendant(self, p: QPainter, t: Theme) -> None:
+        """Draw the rising-sign band along the very bottom edge: up to 12 sign
+        blocks across the day's 24h (left = local midnight), thin cusp dividers,
+        and each block's sign glyph where it fits."""
+        asc_h = self._asc_height()
+        if asc_h <= 0.0 or self._ascendant is None:
+            return
+        s = self._paint_scale()
+        w = self.width()
+        top = self.height() - asc_h
+        dim = not self._in_month
+        segments = self._ascendant.segments
+        # Faint alternating fill so adjacent blocks read apart in greyscale.
+        fills = (QColor(t.DAYLIGHT), QColor(t.DAYLIGHT))
+        fills[0].setAlpha(20 if dim else 40)
+        fills[1].setAlpha(40 if dim else 78)
+        glyph_col = QColor(t.TEXT_MUTED)
+        if dim:
+            glyph_col.setAlpha(120)
+        font = QFont(self.font())
+        font.setPixelSize(max(1, round(_ASC_W * 0.9 * s)))
+        p.save()
+        p.setClipRect(QRectF(0.0, top, w, asc_h))
+        p.setFont(font)
+        fm = p.fontMetrics()
+        for idx, (a, b, sign) in enumerate(segments):
+            rect = QRectF(a * w, top, (b - a) * w, asc_h)
+            p.setPen(Qt.NoPen)
+            p.setBrush(fills[idx % 2])
+            p.drawRect(rect)
+            glyph = _ZODIAC_GLYPHS[sign]
+            if rect.width() >= fm.horizontalAdvance(glyph) + 2.0 * s:
+                p.setPen(glyph_col)
+                p.drawText(rect, Qt.AlignCenter, glyph)
+        # Thin dividers at each internal cusp, and a top border.
+        div = QColor(t.TEXT_FAINT)
+        div.setAlpha(90 if dim else 160)
+        pen = QPen(div)
+        pen.setWidthF(_BAR_BORDER_WIDTH)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        for (a, _b, _sign) in segments[1:]:
+            p.drawLine(QPointF(a * w, top), QPointF(a * w, self.height()))
+        p.drawLine(QPointF(0.0, top), QPointF(w, top))
+        p.restore()
+
     def _canvas_rect(self) -> QRectF:
         """The event-canvas box in the tile body (right of the daylight bar,
         below the number/moon header).
@@ -648,7 +720,8 @@ class DayCell(QPushButton):
         left = (self._bars_width() + 5.0) * s
         pad = _CANVAS_PAD * s
         m = _CANVAS_MARGIN * s
-        bh = self._bars_height() * s          # reserve the bottom bar strip
+        # Reserve the bottom bar strip plus the ascendant band beneath it.
+        bh = self._bars_height() * s + self._asc_height()
         if self._standalone:
             top = (_CANVAS_TOP + 8.0) * s  # clear of the enlarged day number
             right = self.width() / 2.0
@@ -776,6 +849,11 @@ class DayCell(QPushButton):
     def set_moon_bar_visible(self, visible: bool) -> None:
         if visible != self._show_moon_bar:
             self._show_moon_bar = visible
+            self.update()
+
+    def set_ascendant_visible(self, visible: bool) -> None:
+        if visible != self._show_ascendant:
+            self._show_ascendant = visible
             self.update()
 
     def set_bars_horizontal(self, horizontal: bool) -> None:
@@ -1036,6 +1114,8 @@ class DayCell(QPushButton):
         self._show_daylight = other._show_daylight
         self._moonlight = other._moonlight
         self._show_moon_bar = other._show_moon_bar
+        self._ascendant = other._ascendant
+        self._show_ascendant = other._show_ascendant
         self._bars_horizontal = other._bars_horizontal
         self._moon_labels = other._moon_labels
         self._moon_hover_anim.stop()
@@ -1138,6 +1218,10 @@ class DayCell(QPushButton):
             self._draw_hatch(p, moon_rect, mcol, _BAR_HATCH_GAP * s,
                              _BAR_HATCH_WIDTH, forward=True)
             self._draw_bar_border(p, moon_rect)
+
+        # --- Ascendant band: rising zodiac sign across the day, along the very
+        # bottom edge (beneath the daylight/moon strip). ---
+        self._draw_ascendant(p, t)
 
         # --- Event canvas: a box in the tile body holding one glyph per event.
         # Grid tiles are borderless until hovered; the expanded tile shows the
@@ -1847,6 +1931,12 @@ class MonthView(QWidget):
             c.set_moon_bar_visible(visible)
         self._expanded.set_moon_bar_visible(visible)
 
+    def set_ascendant_visible(self, visible: bool) -> None:
+        """Show/hide the rising-sign band across the whole month (View menu)."""
+        for c in self._cells:
+            c.set_ascendant_visible(visible)
+        self._expanded.set_ascendant_visible(visible)
+
     def set_bars_horizontal(self, horizontal: bool) -> None:
         """Lay the daylight/moon time bars along the bottom edge (24h left->
         right) instead of the left edge; a persisted Settings preference."""
@@ -2046,6 +2136,7 @@ class MonthView(QWidget):
                     void_begins=moon_void_begins(day, location),
                     daylight=daylight(day),
                     moonlight=moonlight(day),
+                    ascendant=ascendant(day, location),
                     moon_labels=self._moon_span_labels(day),
                     has_journal=self._journal.has(day),
                     events=self._events.get(day),

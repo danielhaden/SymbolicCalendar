@@ -1,11 +1,13 @@
-"""Daylight (civil twilight -> civil dusk) business logic.
+"""Daylight (dawn -> dusk) business logic.
 
-Uses swisseph (already a kerykeion dependency) to compute civil twilight and
-civil dusk for a configured location, expressed as fractions of the local
-day (0.0 = local midnight, 0.5 = noon, 1.0 = next midnight) so the UI can map
-them straight onto a tile whose height represents 24 hours.
+Uses swisseph (already a kerykeion dependency) to compute the day's dawn and
+dusk for a configured location, expressed as fractions of the local day
+(0.0 = local midnight, 0.5 = noon, 1.0 = next midnight) so the UI can map them
+straight onto a tile whose height represents 24 hours.
 
-Civil twilight is when the Sun's centre is 6 deg below the horizon.
+The bounding sun event is selectable (see ``DAYLIGHT_MODES``): sunrise/sunset
+(the sun's upper limb at the horizon) or civil, nautical, or astronomical
+twilight (the sun's centre 6, 12, or 18 degrees below the horizon).
 """
 
 from __future__ import annotations
@@ -19,8 +21,20 @@ try:
     import swisseph as swe
 
     _SWE_AVAILABLE = True
+    # Which sun event bounds the daylight bar. "sunrise" is the upper limb at
+    # the horizon; the twilight modes are the sun's centre at -6/-12/-18 deg.
+    _TWILIGHT_BIT = {
+        "sunrise": 0,
+        "civil": swe.BIT_CIVIL_TWILIGHT,
+        "nautical": swe.BIT_NAUTIC_TWILIGHT,
+        "astronomical": swe.BIT_ASTRO_TWILIGHT,
+    }
 except Exception:  # pragma: no cover - optional dependency
     _SWE_AVAILABLE = False
+    _TWILIGHT_BIT = {}
+
+# The selectable daylight-bar bounds, in order (Settings menu).
+DAYLIGHT_MODES = ("sunrise", "civil", "nautical", "astronomical")
 
 
 @dataclass(frozen=True)
@@ -42,10 +56,11 @@ DEFAULT_LOCATION = Location(
 
 @dataclass(frozen=True)
 class Daylight:
-    """Civil-daylight window as fractions of the local day (0.0 .. 1.0)."""
+    """The day's dawn->dusk window as fractions of the local day (0.0 .. 1.0).
+    Which sun event bounds it depends on the active mode (see DAYLIGHT_MODES)."""
 
-    dawn_fraction: float   # civil twilight begins (dawn)
-    dusk_fraction: float   # civil twilight ends (dusk)
+    dawn_fraction: float   # dawn / sunrise
+    dusk_fraction: float   # dusk / sunset
 
     @property
     def length_hours(self) -> float:
@@ -59,12 +74,12 @@ class Daylight:
 
     @property
     def dawn_label(self) -> str:
-        """Civil dawn as local clock time, e.g. '05:12'."""
+        """Dawn/sunrise as local clock time, e.g. '05:12'."""
         return self._hhmm(self.dawn_fraction)
 
     @property
     def dusk_label(self) -> str:
-        """Civil dusk as local clock time, e.g. '21:04'."""
+        """Dusk/sunset as local clock time, e.g. '21:04'."""
         return self._hhmm(self.dusk_fraction)
 
 
@@ -116,21 +131,41 @@ def set_current_location(location: Location) -> None:
     _current_location = location
 
 
-def daylight(day: date, location: Location | None = None) -> Daylight | None:
-    """Civil dawn/dusk for ``day`` as local-day fractions, or None.
+# The active daylight-bar mode (see DAYLIGHT_MODES), settable at runtime.
+_current_daylight_mode: str = "civil"
 
-    Uses the current location unless one is given. Returns None if swisseph
-    is unavailable or the Sun is circumpolar (polar day/night), in which case
-    the UI simply omits the indicator.
+
+def current_daylight_mode() -> str:
+    return _current_daylight_mode
+
+
+def set_daylight_mode(mode: str) -> None:
+    """Change which sun event bounds the daylight bar (see DAYLIGHT_MODES)."""
+    global _current_daylight_mode
+    if mode in DAYLIGHT_MODES:
+        _current_daylight_mode = mode
+
+
+def daylight(day: date, location: Location | None = None,
+             mode: str | None = None) -> Daylight | None:
+    """Daylight window for ``day`` as local-day fractions, or None.
+
+    The bounds depend on ``mode`` (see DAYLIGHT_MODES): sunrise/sunset or civil,
+    nautical, or astronomical dawn/dusk; defaults to the current mode. Uses the
+    current location unless one is given. Returns None if swisseph is
+    unavailable or the Sun stays below the threshold all day (polar night for
+    that mode), in which case the UI simply omits the indicator.
     """
-    return _compute_daylight(day, location or _current_location)
+    return _compute_daylight(day, location or _current_location,
+                             mode or _current_daylight_mode)
 
 
-@lru_cache(maxsize=2048)
-def _compute_daylight(day: date, location: Location) -> Daylight | None:
+@lru_cache(maxsize=4096)
+def _compute_daylight(day: date, location: Location, mode: str) -> Daylight | None:
     if not _SWE_AVAILABLE:
         return None
     try:
+        bit = _TWILIGHT_BIT.get(mode, 0)  # 0 = sunrise/sunset (upper limb)
         offset = _utc_offset_hours(location, day)
         # Julian day of local midnight, expressed as Universal Time, so that
         # the search starts at the beginning of the *local* day.
@@ -140,11 +175,11 @@ def _compute_daylight(day: date, location: Location) -> Daylight | None:
 
         rc_dawn, t_dawn = swe.rise_trans(
             jd_midnight, swe.SUN,
-            swe.CALC_RISE | swe.BIT_CIVIL_TWILIGHT, geopos, 0.0, 0.0, flags,
+            swe.CALC_RISE | bit, geopos, 0.0, 0.0, flags,
         )
         rc_dusk, t_dusk = swe.rise_trans(
             jd_midnight, swe.SUN,
-            swe.CALC_SET | swe.BIT_CIVIL_TWILIGHT, geopos, 0.0, 0.0, flags,
+            swe.CALC_SET | bit, geopos, 0.0, 0.0, flags,
         )
         if rc_dawn != 0 or rc_dusk != 0:
             return None  # circumpolar: no civil twilight that day

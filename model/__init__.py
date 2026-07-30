@@ -18,13 +18,16 @@ from .lunation import (
     venus_ingress,
 )
 from .daylight import (
+    DAYLIGHT_MODES,
     Daylight,
     Location,
     Moonlight,
+    current_daylight_mode,
     current_location,
     daylight,
     moonlight,
     set_current_location,
+    set_daylight_mode,
 )
 from .ascendant import Ascendant, ascendant
 
@@ -52,6 +55,9 @@ __all__ = [
     "moonlight",
     "current_location",
     "set_current_location",
+    "DAYLIGHT_MODES",
+    "current_daylight_mode",
+    "set_daylight_mode",
     "Ascendant",
     "ascendant",
 ]

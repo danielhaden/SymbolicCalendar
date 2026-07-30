@@ -28,11 +28,13 @@ from PySide6.QtWidgets import (
 )
 
 from model import (
+    DAYLIGHT_MODES,
     CalendarModel,
     Events,
     Journal,
     current_location,
     set_current_location,
+    set_daylight_mode,
 )
 from model.updates import Release, check_for_update
 from .theme import ThemeManager
@@ -171,6 +173,13 @@ class MainWindow(QMainWindow):
         data_dir = Path(folder)
         self._journal = Journal(data_dir / "journal.json")
         self._events = Events(data_dir / "events.json")
+        # Which sun event bounds the daylight bar (persisted; applied before the
+        # month view first computes its bars).
+        self._daylight_mode = self._settings.value(
+            "view/daylight_mode", "civil", type=str)
+        if self._daylight_mode not in DAYLIGHT_MODES:
+            self._daylight_mode = "civil"
+        set_daylight_mode(self._daylight_mode)
         self._month_view = MonthView(
             self._model, self._theme, self._journal, self._events
         )
@@ -227,6 +236,23 @@ class MainWindow(QMainWindow):
         bars_action.setCheckable(True)
         bars_action.setChecked(self._bars_horizontal)
         bars_action.toggled.connect(self._on_toggle_bars_horizontal)
+
+        daylight_menu = settings_menu.addMenu("Daylight bar shows")
+        daylight_group = QActionGroup(self)
+        daylight_group.setExclusive(True)
+        for key, label in (
+            ("sunrise", "Sunrise / Sunset"),
+            ("civil", "Civil dawn / dusk"),
+            ("nautical", "Nautical dawn / dusk"),
+            ("astronomical", "Astronomical dawn / dusk"),
+        ):
+            action = daylight_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key == self._daylight_mode)
+            daylight_group.addAction(action)
+            action.triggered.connect(
+                lambda _checked, k=key: self._on_set_daylight_mode(k))
+
         settings_menu.addSeparator()
         self._data_folder_action = settings_menu.addAction("")
         self._data_folder_action.setEnabled(False)  # a non-clickable label
@@ -236,6 +262,12 @@ class MainWindow(QMainWindow):
         self._bars_horizontal = horizontal
         self._settings.setValue("view/bars_horizontal", horizontal)
         self._month_view.set_bars_horizontal(horizontal)
+
+    def _on_set_daylight_mode(self, mode: str) -> None:
+        self._daylight_mode = mode
+        self._settings.setValue("view/daylight_mode", mode)
+        set_daylight_mode(mode)
+        self._month_view.reload()  # recompute the daylight bars for the month
 
     @staticmethod
     def _default_data_folder() -> str:

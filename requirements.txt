@@ -4,3 +4,8 @@ PySide6>=6.9
 # Astrology/ephemeris data: moon phase, planet signs, retrograde state.
 # Pulls in pyswisseph, which is also used directly for civil-twilight times.
 kerykeion>=4.26
+
+# CA bundle for HTTPS verification of the GitHub update check. Bundled into the
+# packaged app so TLS works without relying on the build machine's system certs
+# (which aren't present inside the .app).
+certifi>=2024.2.2

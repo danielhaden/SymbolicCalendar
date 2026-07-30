@@ -65,6 +65,7 @@ from model import (
     planet_station,
     planets_in_signs,
 )
+from .symbol_completer import SymbolCompleter
 from .theme import Theme, ThemeManager
 
 # Unicode zodiac glyphs, keyed by kerykeion's sign abbreviation. Drawn in
@@ -1609,6 +1610,8 @@ class MonthView(QWidget):
         self._event_edit.hide()
         self._event_edit.commit_requested.connect(self._commit_event_text)
         self._event_edit.cancel_requested.connect(self._cancel_event_text)
+        # In-editor "#name" symbol picker (e.g. #lambda -> λ) for event labels.
+        self._symbol_completer = SymbolCompleter(self._event_edit, self)
         # (cell, day, index) of the event currently being edited, or None.
         self._event_editing: tuple[DayCell, date, int] | None = None
 
@@ -2140,6 +2143,7 @@ class MonthView(QWidget):
     # -- theming ---------------------------------------------------------
     def _apply_theme(self) -> None:
         t = self._theme.current
+        self._symbol_completer.set_theme(t)
 
         nav_qss = f"""
         QPushButton {{

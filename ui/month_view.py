@@ -30,6 +30,7 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -156,6 +157,10 @@ def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
 # Moon-phase glyph geometry (top-right corner of a tile).
 _MOON_RADIUS = 4.5
 
+# Journal star (grid tiles): outer radius and gap from the date number.
+_STAR_R = 4.2
+_STAR_GAP = 3.5
+
 # Event canvas geometry (the tile-body box that holds event glyphs).
 _CANVAS_TOP = 30.0      # below the number / moon header
 _CANVAS_MARGIN = 4.0    # gap from the tile's right / bottom edges
@@ -264,6 +269,9 @@ class DayCell(QPushButton):
     collapse_requested = Signal()
     # Emitted (expanded tile) when the journal corner is clicked (toggle).
     journal_requested = Signal()
+    # Emitted (grid tile) when the journal star is clicked: expand the day and
+    # open its journal entry.
+    journal_open_requested = Signal()
     # Emitted (expanded tile) when clicking the tile away from the number /
     # journal corner — used to dismiss an open journal box.
     outside_journal_clicked = Signal()
@@ -357,6 +365,14 @@ class DayCell(QPushButton):
         self._canvas_anim.setDuration(_CANVAS_FADE_MS)
         self._canvas_anim.setEasingCurve(QEasingCurve.InOutQuad)
         self._canvas_anim.valueChanged.connect(self._on_canvas_anim)
+        # Journal star (grid tiles): a small 5-point star by the date number,
+        # shown when the day has an entry; grey, fading to black while hovered.
+        self._star_hover = False
+        self._star_progress = 0.0        # 0 = grey, 1 = black
+        self._star_anim = QVariantAnimation(self)
+        self._star_anim.setDuration(_MOONBAR_FADE_MS)
+        self._star_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._star_anim.valueChanged.connect(self._on_star_anim)
         self._events: list[Event] = []          # this day's events (text+notes)
         # Drag state for moving an event box within the canvas (grid tiles).
         self._drag_index: int | None = None
@@ -1063,6 +1079,7 @@ class DayCell(QPushButton):
         self._set_canvas_over(False)
         self._set_moon_hover(None)
         self._set_bar_hover(False)
+        self._set_star_hover(False)
         if self._daylight_hover:
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
@@ -1096,6 +1113,8 @@ class DayCell(QPushButton):
                 self.daylight_hover_changed.emit()
             self._set_moon_hover(self._moon_segment_at(pos))
         self._set_canvas_over(self._canvas_rect().contains(pos))
+        self._set_star_hover(
+            self._has_journal and self._star_hit_rect().contains(pos))
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event) -> None:
@@ -1110,6 +1129,11 @@ class DayCell(QPushButton):
                 self.outside_journal_clicked.emit()
             return  # consume; standalone tile isn't selectable
         if event.button() == Qt.LeftButton and self._date is not None:
+            if self._has_journal \
+                    and self._star_hit_rect().contains(event.position()):
+                self.journal_open_requested.emit()   # expand + open the journal
+                event.accept()
+                return
             idx = self._event_box_at(event.position())
             if idx is not None:
                 # Begin dragging this event box (don't select the day).
@@ -1143,8 +1167,10 @@ class DayCell(QPushButton):
             super().mouseDoubleClickEvent(event)
             return
         if self._date is not None and event.button() == Qt.LeftButton:
-            idx = self._event_box_at(event.position())
-            if idx is not None:
+            if self._has_journal \
+                    and self._star_hit_rect().contains(event.position()):
+                pass  # the star's single-click already opened the day
+            elif (idx := self._event_box_at(event.position())) is not None:
                 self._drag_index = None  # cancel the drag the press just began
                 self.event_edit_requested.emit(idx)  # edit this event's text
             else:
@@ -1249,6 +1275,59 @@ class DayCell(QPushButton):
         """Generous lower-right region around the journal corner mark."""
         d = 30.0 * self._paint_scale()
         return QRectF(self.width() - d, self.height() - d, d, d)
+
+    # -- journal star (grid tiles) ---------------------------------------
+    def _star_geom(self) -> tuple[float, float, float]:
+        """Centre (cx, cy) and outer radius of the journal star: snug to the
+        right of the date number. Uses the number's *current* font (which grows
+        when a hovered/today tile emphasises it), so the star stays beside the
+        number in every state rather than leaving a gap."""
+        s = self._paint_scale()
+        bars = self._bars_width()
+        left = ((bars + 4) if bars else 9) * s
+        emphasize = self._today or self._hover or self._standalone
+        font = QFont(self.font())
+        font.setPixelSize(max(1, round((23 if emphasize else 13) * s)))
+        font.setBold(emphasize)
+        fm = QFontMetricsF(font)
+        num_w = fm.horizontalAdvance(str(self._date.day)) if self._date else 0.0
+        outer = _STAR_R * s
+        cx = left + num_w + _STAR_GAP * s + outer
+        cy = 9.0 * s + fm.capHeight() * 0.5
+        return cx, cy, outer
+
+    def _star_hit_rect(self) -> QRectF:
+        """A padded square around the star, for hover/click hit-testing."""
+        cx, cy, outer = self._star_geom()
+        pad = outer + 3.0 * self._paint_scale()
+        return QRectF(cx - pad, cy - pad, 2 * pad, 2 * pad)
+
+    def _star_polygon(self, cx: float, cy: float, outer: float) -> QPolygonF:
+        """A 5-point star centred at (cx, cy); inner radius is 40% of outer."""
+        inner = outer * 0.42
+        pts = []
+        for i in range(10):
+            ang = -math.pi / 2 + i * math.pi / 5     # 36 deg steps, first point up
+            r = outer if i % 2 == 0 else inner
+            pts.append(QPointF(cx + r * math.cos(ang), cy + r * math.sin(ang)))
+        return QPolygonF(pts)
+
+    def _set_star_hover(self, over: bool) -> None:
+        if over == self._star_hover:
+            return
+        self._star_hover = over
+        end = 1.0 if over else 0.0
+        if self._star_progress == end \
+                and self._star_anim.state() != QVariantAnimation.Running:
+            return
+        self._star_anim.stop()
+        self._star_anim.setStartValue(self._star_progress)
+        self._star_anim.setEndValue(end)
+        self._star_anim.start()
+
+    def _on_star_anim(self, value: float) -> None:
+        self._star_progress = float(value)
+        self.update()
 
     # -- painting --------------------------------------------------------
     def paintEvent(self, event) -> None:
@@ -1475,27 +1554,27 @@ class DayCell(QPushButton):
         text_rect = QRectF(self.rect()).adjusted(left * s, 9 * s, -5 * s, -5 * s)
         p.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
 
-        # --- Journal corner: a thin diagonal (~15px) across the lower-right
-        # corner. In the grid it appears only when the day has an entry; on
-        # the expanded tile it's always shown as a create/edit handle that
-        # turns black on hover. ---
+        # --- Journal marker. Expanded tile: a diagonal create/edit handle in
+        # the lower-right corner (always shown), black on hover. Grid tile: a
+        # small 5-point star beside the date number when the day has an entry —
+        # grey, fading to black while hovered; clicking it opens the day. ---
         if self._standalone:
             jcolor = QColor(0, 0, 0) if self._journal_hover else QColor(t.TEXT_FAINT)
-            draw_journal = True
-            # Cut a larger corner so the line is further from the corner point
-            # while still reaching the bottom/right edges; and a bit thicker.
-            d, j_width = 15.0 * s + 8.0, 1.8
-        else:
-            jcolor = QColor(t.TEXT_MUTED)
-            draw_journal = self._has_journal
-            d, j_width = 15.0 * s, 1.0
-        if draw_journal:
             jpen = QPen(jcolor)
-            jpen.setWidthF(j_width)
+            jpen.setWidthF(1.8)
             p.setPen(jpen)
+            d = 15.0 * s + 8.0
             jb = self._bars_height() * s      # sit above a bottom bar strip
             p.drawLine(QPointF(w - d, h - 1.0 - jb),
                        QPointF(w - 1.0, h - d - jb))
+        elif self._has_journal:
+            col = _blend(QColor(t.TEXT_MUTED), QColor(0, 0, 0), self._star_progress)
+            if not self._in_month:
+                col.setAlpha(120)
+            cx, cy, outer = self._star_geom()
+            p.setPen(Qt.NoPen)
+            p.setBrush(col)
+            p.drawPolygon(self._star_polygon(cx, cy, outer))
 
         # --- Moon-bar hover: the hovered span's moonrise (at its top) and
         # moonset (at its bottom) as small time chips. Rise/set may fall on the
@@ -1584,6 +1663,7 @@ class MonthView(QWidget):
         self._expand_anim.finished.connect(self._on_expand_finished)
         self._expanded_start = QRect()
         self._collapsing = False
+        self._open_journal_after_expand = False   # journal-star click flow
 
         # Journal editor: an editable textbox that fills the expanded tile.
         self._journal_edit = JournalEdit(self)
@@ -1627,6 +1707,15 @@ class MonthView(QWidget):
     def _on_cell_double_clicked(self) -> None:
         self._expand_cell(self.sender())
 
+    def _on_journal_open(self) -> None:
+        # Journal-star click: expand the day, then open its journal once the
+        # expand animation settles (so the editor lands at full size).
+        cell = self.sender()
+        if not isinstance(cell, DayCell) or cell.date is None:
+            return
+        self._open_journal_after_expand = True
+        self._expand_cell(cell)
+
     def _expand_cell(self, cell: object) -> None:
         if not isinstance(cell, DayCell) or cell.date is None:
             return
@@ -1660,6 +1749,10 @@ class MonthView(QWidget):
         if self._collapsing:
             self._expanded.hide()
             self._collapsing = False
+            self._open_journal_after_expand = False
+        elif self._open_journal_after_expand:
+            self._open_journal_after_expand = False
+            self._open_journal()
 
     # -- journal ---------------------------------------------------------
     def _toggle_journal(self) -> None:
@@ -1826,6 +1919,7 @@ class MonthView(QWidget):
                 cell.clicked.connect(self._on_cell_clicked)
                 cell.daylight_hover_changed.connect(self._on_daylight_hover)
                 cell.double_clicked.connect(self._on_cell_double_clicked)
+                cell.journal_open_requested.connect(self._on_journal_open)
                 cell.event_add_requested.connect(self._on_event_add)
                 cell.event_edit_requested.connect(self._on_event_edit)
                 cell.event_moved.connect(self._on_event_moved)

@@ -176,7 +176,7 @@ _CANVAS_FADE_MS = 180
 # Free-text event boxes placed on the grid-tile canvas.
 _EVENT_MAX_CHARS = 20    # hard cap on an event's label length
 _EVENT_TEXT_PX = 9.5     # default unscaled pixel size of the label text
-_EVENT_BOX_PAD = 3.0     # padding inside an event's box, around the text
+_EVENT_BOX_PAD = 2.0     # padding inside an event's box, around the glyph ink
 # Per-event resize (drag the box's lower edge up/down to size the key text).
 _EVENT_MIN_PX = 7.0      # smallest key font size
 _EVENT_MAX_PX = 26.0     # largest key font size
@@ -924,15 +924,17 @@ class DayCell(QPushButton):
         return font
 
     def _event_box_rect(self, index: int) -> QRectF:
-        """Grid-tile bounding box for event ``index``: centred at its stored
-        canvas fraction, sized to its text (at the event's font size), and
-        clamped so the whole box stays within the canvas frame."""
+        """Grid-tile bounding box for event ``index``: a tight box around the
+        key's actual ink (not its font advance/line-height), so even a large
+        glyph can sit near the canvas edges. Centred at the stored canvas
+        fraction and clamped so the whole box stays within the canvas."""
         canvas = self._canvas_rect()
         e = self._events[index]
         fm = QFontMetricsF(self._event_font(self._event_size_px(e)))
         pad = _EVENT_BOX_PAD * self._paint_scale()
-        bw = min(fm.horizontalAdvance(e.key or " ") + 2 * pad, canvas.width())
-        bh = min(fm.height() + 2 * pad, canvas.height())
+        tr = fm.tightBoundingRect(e.key or " ")
+        bw = min(tr.width() + 2 * pad, canvas.width())
+        bh = min(tr.height() + 2 * pad, canvas.height())
         cx = canvas.left() + e.x * canvas.width()
         cy = canvas.top() + e.y * canvas.height()
         left = min(max(cx - bw / 2, canvas.left()), canvas.right() - bw)
@@ -1537,18 +1539,23 @@ class DayCell(QPushButton):
             # so a box never spills past the frame.
             p.save()
             p.setClipRect(canvas)
+            pad = _EVENT_BOX_PAD * s
             for i, e in enumerate(self._events):
                 if not e.key:
                     continue  # empty (being typed into the inline editor)
+                font = self._event_font(self._event_size_px(e))
+                tr = QFontMetricsF(font).tightBoundingRect(e.key)
                 box = self._event_box_rect(i)
                 bg = QColor(t.BG_1)
                 bg.setAlpha(210)
                 p.setPen(Qt.NoPen)
                 p.setBrush(bg)
-                p.drawRoundedRect(box, 3, 3)
-                p.setFont(self._event_font(self._event_size_px(e)))
+                p.drawRoundedRect(box, 2, 2)
+                p.setFont(font)
                 p.setPen(QColor(t.TEXT))
-                p.drawText(box, Qt.AlignCenter, e.key)
+                # Baseline placed so the glyph's ink sits inside the tight box.
+                p.drawText(QPointF(box.left() + pad - tr.x(),
+                                   box.top() + pad - tr.y()), e.key)
             p.restore()
 
         # --- Top-right glyph: the zodiac sign on a day the Moon enters a new

@@ -373,6 +373,28 @@ class Events:
             return
         self._save()
 
+    def propagate(self, event_id: str, day: date, location: bool,
+                  size: bool) -> int:
+        """Copy the event's chosen display properties (tile ``location`` = x/y,
+        and/or ``size``) onto every other event with the same key that starts
+        after ``day``. Returns how many events changed."""
+        src = self.event(event_id)
+        if src is None or not (location or size):
+            return 0
+        changed = 0
+        for ev in self._events:
+            if ev.id == src.id or ev.key != src.key \
+                    or ev.start is None or ev.start <= day:
+                continue
+            if location:
+                ev.x, ev.y = src.x, src.y
+            if size:
+                ev.size = src.size
+            changed += 1
+        if changed:
+            self._save()
+        return changed
+
     def set_recurrence(self, event_id: str, rule: RecurrenceRule | None) -> None:
         """Set (or clear, with None) an event's recurrence rule."""
         ev = self.event(event_id)

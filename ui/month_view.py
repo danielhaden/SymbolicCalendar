@@ -67,6 +67,7 @@ from model import (
     planet_station,
     planets_in_signs,
 )
+from .propagate_dialog import PropagateDialog
 from .recurrence_dialog import RecurrenceDialog
 from .symbol_completer import SymbolCompleter
 from .theme import Theme, ThemeManager
@@ -271,6 +272,9 @@ class DayCell(QPushButton):
     event_delete_requested = Signal(int)
     # Emitted from the grid-tile context menu to set an event's recurrence.
     event_repeat_requested = Signal(int)
+    # Emitted from the grid-tile context menu to propagate an event's display
+    # properties onto later same-key events.
+    event_propagate_requested = Signal(int)
     # Emitted (expanded tile) on double-click of an event, to edit its note.
     event_note_requested = Signal(int)
     # Emitted (expanded tile) on any press, so an open inline editor can save.
@@ -1292,6 +1296,8 @@ class DayCell(QPushButton):
         if idx is not None:
             menu.addAction("Repeat…",
                            lambda: self.event_repeat_requested.emit(idx))
+            menu.addAction("Propagate properties…",
+                           lambda: self.event_propagate_requested.emit(idx))
             menu.addAction("Delete Event",
                            lambda: self.event_delete_requested.emit(idx))
         else:
@@ -2035,6 +2041,7 @@ class MonthView(QWidget):
                 cell.event_resized.connect(self._on_event_resized)
                 cell.event_delete_requested.connect(self._on_event_delete)
                 cell.event_repeat_requested.connect(self._on_event_repeat)
+                cell.event_propagate_requested.connect(self._on_event_propagate)
                 grid.addWidget(cell, r, c)
                 self._cells.append(cell)
         return grid
@@ -2104,6 +2111,21 @@ class MonthView(QWidget):
         if dialog.exec():
             self._events.set_recurrence(event.id, dialog.rule())
             self._refresh()   # a new rule changes occurrences across the month
+
+    def _on_event_propagate(self, index: int) -> None:
+        # "Propagate properties…": copy this event's chosen display properties
+        # onto every later event with the same key.
+        cell = self.sender()
+        if not isinstance(cell, DayCell) or cell.date is None:
+            return
+        if not 0 <= index < len(cell._events):
+            return
+        occ = cell._events[index]
+        dialog = PropagateDialog(occ.key, self._theme.current, self)
+        if dialog.exec():
+            location, size = dialog.selections()
+            self._events.propagate(occ.event_id, cell.date, location, size)
+            self._refresh()   # positions/sizes may change across the month
 
     def _scope_for(self, occ, verb: str) -> str | None:
         """Which scope to apply for an action on ``occ``: 'series' outright for

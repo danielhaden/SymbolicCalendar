@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QTextEdit,
@@ -66,6 +67,7 @@ from model import (
     planet_station,
     planets_in_signs,
 )
+from .recurrence_dialog import RecurrenceDialog
 from .symbol_completer import SymbolCompleter
 from .theme import Theme, ThemeManager
 
@@ -261,6 +263,8 @@ class DayCell(QPushButton):
     event_moved = Signal(int, float, float)
     # Emitted from the grid-tile context menu to delete an event (index).
     event_delete_requested = Signal(int)
+    # Emitted from the grid-tile context menu to set an event's recurrence.
+    event_repeat_requested = Signal(int)
     # Emitted (expanded tile) on double-click of an event, to edit its note.
     event_note_requested = Signal(int)
     # Emitted (expanded tile) on any press, so an open inline editor can save.
@@ -1193,6 +1197,8 @@ class DayCell(QPushButton):
         menu = QMenu(self)
         idx = self._event_box_at(pos)
         if idx is not None:
+            menu.addAction("Repeat…",
+                           lambda: self.event_repeat_requested.emit(idx))
             menu.addAction("Delete Event",
                            lambda: self.event_delete_requested.emit(idx))
         else:
@@ -1924,6 +1930,7 @@ class MonthView(QWidget):
                 cell.event_edit_requested.connect(self._on_event_edit)
                 cell.event_moved.connect(self._on_event_moved)
                 cell.event_delete_requested.connect(self._on_event_delete)
+                cell.event_repeat_requested.connect(self._on_event_repeat)
                 grid.addWidget(cell, r, c)
                 self._cells.append(cell)
         return grid
@@ -1946,14 +1953,67 @@ class MonthView(QWidget):
 
     def _on_event_moved(self, index: int, x: float, y: float) -> None:
         cell = self.sender()
-        if isinstance(cell, DayCell) and cell.date is not None:
-            self._events.move(cell.date, index, x, y)
+        if not isinstance(cell, DayCell) or cell.date is None:
+            return
+        if not 0 <= index < len(cell._events):
+            return
+        occ = cell._events[index]
+        scope = self._scope_for(occ, "Move")
+        if scope is None:
+            self._refresh_events(cell, cell.date)  # cancelled: revert the drag
+            return
+        self._events.set_position(occ.event_id, cell.date, x, y, scope)
+        self._refresh_events(cell, cell.date)
 
     def _on_event_delete(self, index: int) -> None:
         cell = self.sender()
-        if isinstance(cell, DayCell) and cell.date is not None:
-            self._events.remove(cell.date, index)
-            self._refresh_events(cell, cell.date)
+        if not isinstance(cell, DayCell) or cell.date is None:
+            return
+        if not 0 <= index < len(cell._events):
+            return
+        occ = cell._events[index]
+        scope = self._scope_for(occ, "Delete")
+        if scope is None:
+            return
+        self._events.delete(occ.event_id, cell.date, scope)
+        self._refresh_events(cell, cell.date)
+
+    def _on_event_repeat(self, index: int) -> None:
+        # "Repeat…" from the event context menu: edit the recurrence rule.
+        cell = self.sender()
+        if not isinstance(cell, DayCell) or cell.date is None:
+            return
+        if not 0 <= index < len(cell._events):
+            return
+        event = self._events.event(cell._events[index].event_id)
+        if event is None:
+            return
+        dialog = RecurrenceDialog(
+            event.recur, event.start or cell.date, self._theme.current, self)
+        if dialog.exec():
+            self._events.set_recurrence(event.id, dialog.rule())
+            self._refresh()   # a new rule changes occurrences across the month
+
+    def _scope_for(self, occ, verb: str) -> str | None:
+        """Which scope to apply for an action on ``occ``: 'series' outright for
+        a one-off, else a This/All prompt returning 'this'/'series'/None."""
+        if not occ.recurring:
+            return "series"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Repeating event")
+        box.setText(f"{verb} this occurrence or the entire series?")
+        this_btn = box.addButton("This occurrence", QMessageBox.AcceptRole)
+        all_btn = box.addButton("Entire series", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(this_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is this_btn:
+            return "this"
+        if clicked is all_btn:
+            return "series"
+        return None
 
     def _refresh_events(self, cell: DayCell, day: date) -> None:
         """Re-read one cell's events and repaint it (no full-grid rebuild)."""
@@ -2005,12 +2065,16 @@ class MonthView(QWidget):
         events = self._events.get(day)
         if not 0 <= index < len(events):
             return
+        occ = events[index]
         if text:
-            e = events[index]
-            self._events.update(day, index,
-                                Event(text=text, x=e.x, y=e.y, notes=e.notes))
+            if text != occ.text:  # only prompt/write on an actual change
+                scope = self._scope_for(occ, "Edit")
+                if scope is not None:
+                    self._events.set_text(occ.event_id, day, text, scope)
         else:
-            self._events.remove(day, index)  # empty label -> discard the event
+            scope = self._scope_for(occ, "Delete")  # empty label -> delete
+            if scope is not None:
+                self._events.delete(occ.event_id, day, scope)
         self._refresh_events(cell, day)
 
     def _cancel_event_text(self) -> None:

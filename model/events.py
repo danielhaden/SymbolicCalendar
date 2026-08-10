@@ -112,6 +112,7 @@ class Event:
     value: str = ""
     x: float = 0.5
     y: float = 0.5
+    size: float = 0.0          # key font size (unscaled px); 0 = UI default
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     start: date | None = None
     recur: RecurrenceRule | None = None
@@ -123,6 +124,8 @@ class Event:
             "x": self.x, "y": self.y,
             "start": (self.start or date.today()).isoformat(),
         }
+        if self.size > 0:
+            d["size"] = self.size
         if self.recur is not None:
             d["recur"] = self.recur.to_dict()
         if self.overrides:
@@ -147,9 +150,13 @@ class Event:
         if isinstance(d.get("recur"), dict):
             recur = RecurrenceRule.from_dict(d["recur"])
         value = d.get("value", d.get("notes", ""))  # "notes" pre-rename
+        try:
+            size = max(0.0, float(d.get("size", 0.0)))
+        except (TypeError, ValueError):
+            size = 0.0
         return Event(
             key=str(key), value=str(value), x=_clamp01(d.get("x", 0.5)),
-            y=_clamp01(d.get("y", 0.5)),
+            y=_clamp01(d.get("y", 0.5)), size=size,
             id=str(d.get("id") or uuid.uuid4().hex), start=start,
             recur=recur, overrides=overrides,
         )
@@ -167,6 +174,7 @@ class Occurrence:
     value: str
     x: float
     y: float
+    size: float
     recurring: bool
 
 
@@ -217,7 +225,8 @@ def _resolve(event: Event, day: date) -> Occurrence | None:
         value = str(ov.get("value", value))
         x = _clamp01(ov.get("x", x))
         y = _clamp01(ov.get("y", y))
-    return Occurrence(event.id, day, key, value, x, y, event.recur is not None)
+    return Occurrence(event.id, day, key, value, x, y, event.size,
+                      event.recur is not None)
 
 
 class Events:
@@ -351,6 +360,17 @@ class Events:
             self._override(ev, day)["deleted"] = True
         else:
             self._events = [e for e in self._events if e.id != event_id]
+        self._save()
+
+    def set_size(self, event_id: str, size: float) -> None:
+        """Set the key font size (unscaled px) for the whole series."""
+        ev = self.event(event_id)
+        if ev is None:
+            return
+        try:
+            ev.size = max(0.0, float(size))
+        except (TypeError, ValueError):
+            return
         self._save()
 
     def set_recurrence(self, event_id: str, rule: RecurrenceRule | None) -> None:

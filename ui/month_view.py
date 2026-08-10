@@ -175,8 +175,13 @@ _CANVAS_HOVER_DELAY_MS = 150
 _CANVAS_FADE_MS = 180
 # Free-text event boxes placed on the grid-tile canvas.
 _EVENT_MAX_CHARS = 20    # hard cap on an event's label length
-_EVENT_TEXT_PX = 9.5     # unscaled pixel size of the label text
+_EVENT_TEXT_PX = 9.5     # default unscaled pixel size of the label text
 _EVENT_BOX_PAD = 3.0     # padding inside an event's box, around the text
+# Per-event resize (drag the box's lower edge up/down to size the key text).
+_EVENT_MIN_PX = 7.0      # smallest key font size
+_EVENT_MAX_PX = 26.0     # largest key font size
+_EVENT_RESIZE_BAND = 4.0  # grab band around the box's bottom edge (unscaled)
+_EVENT_RESIZE_SENS = 0.16  # font px change per drag px (up = bigger)
 
 
 def _moon_lit_path(cx: float, cy: float, r: float,
@@ -260,6 +265,8 @@ class DayCell(QPushButton):
     event_edit_requested = Signal(int)
     # Emitted after dragging an event box: (index, x, y) as canvas fractions.
     event_moved = Signal(int, float, float)
+    # Emitted after resizing an event box: (index, key font size in px).
+    event_resized = Signal(int, float)
     # Emitted from the grid-tile context menu to delete an event (index).
     event_delete_requested = Signal(int)
     # Emitted from the grid-tile context menu to set an event's recurrence.
@@ -381,6 +388,11 @@ class DayCell(QPushButton):
         self._drag_index: int | None = None
         self._drag_offset = QPointF(0.0, 0.0)   # cursor -> box-centre offset
         self._drag_moved = False
+        # Resize state: dragging an event box's lower edge sizes its key text.
+        self._resize_index: int | None = None
+        self._resize_start_y = 0.0
+        self._resize_start_size = 0.0
+        self._resize_changed = False
         # Seamless grid: every cell draws its left + bottom edge, so a tile's
         # bottom coincides with the horizontal gridline. Row 0 / the last
         # column add the outer top / right edges.
@@ -901,19 +913,23 @@ class DayCell(QPushButton):
                 return i
         return None
 
-    # -- grid-tile event boxes (free-text, draggable) --------------------
-    def _event_font(self) -> QFont:
+    # -- grid-tile event boxes (free-text, draggable, resizable) ---------
+    def _event_size_px(self, occ) -> float:
+        """Effective unscaled key font size for an occurrence (default if unset)."""
+        return occ.size if getattr(occ, "size", 0.0) > 0 else _EVENT_TEXT_PX
+
+    def _event_font(self, size_px: float = _EVENT_TEXT_PX) -> QFont:
         font = QFont(self.font())
-        font.setPixelSize(max(1, round(_EVENT_TEXT_PX * self._paint_scale())))
+        font.setPixelSize(max(1, round(size_px * self._paint_scale())))
         return font
 
     def _event_box_rect(self, index: int) -> QRectF:
         """Grid-tile bounding box for event ``index``: centred at its stored
-        canvas fraction, sized to its text, and clamped so the whole box stays
-        within the canvas frame."""
+        canvas fraction, sized to its text (at the event's font size), and
+        clamped so the whole box stays within the canvas frame."""
         canvas = self._canvas_rect()
         e = self._events[index]
-        fm = QFontMetricsF(self._event_font())
+        fm = QFontMetricsF(self._event_font(self._event_size_px(e)))
         pad = _EVENT_BOX_PAD * self._paint_scale()
         bw = min(fm.horizontalAdvance(e.key or " ") + 2 * pad, canvas.width())
         bh = min(fm.height() + 2 * pad, canvas.height())
@@ -929,6 +945,30 @@ class DayCell(QPushButton):
             if self._event_box_rect(i).contains(pos):
                 return i
         return None
+
+    def _event_resize_at(self, pos) -> int | None:
+        """Index of the event box whose lower-edge grab band contains ``pos``."""
+        band = _EVENT_RESIZE_BAND * self._paint_scale()
+        for i in reversed(range(len(self._events))):
+            b = self._event_box_rect(i)
+            if b.left() <= pos.x() <= b.right() \
+                    and abs(pos.y() - b.bottom()) <= band:
+                return i
+        return None
+
+    def _resize_event_to(self, pos) -> None:
+        """Set the resized event's font size from the vertical drag (up=bigger),
+        clamped to the min/max, and repaint live."""
+        i = self._resize_index
+        if i is None or not 0 <= i < len(self._events):
+            return
+        delta = (self._resize_start_y - pos.y()) * _EVENT_RESIZE_SENS
+        size = max(_EVENT_MIN_PX,
+                   min(_EVENT_MAX_PX, self._resize_start_size + delta))
+        if size != self._events[i].size:
+            self._events[i].size = size
+            self._resize_changed = True
+            self.update()
 
     def _drag_event_to(self, pos) -> None:
         """Move the dragged event box so its centre tracks ``pos`` (minus the
@@ -1098,6 +1138,7 @@ class DayCell(QPushButton):
             super().leaveEvent(event)
             return
         self._hover = False
+        self.setCursor(Qt.PointingHandCursor)   # clear any resize cursor
         self._set_canvas_over(False)
         self._set_moon_hover(None)
         self._set_bar_hover(False)
@@ -1120,6 +1161,9 @@ class DayCell(QPushButton):
                 self.update()
             return
         pos = event.position()
+        if self._resize_index is not None and (event.buttons() & Qt.LeftButton):
+            self._resize_event_to(pos)
+            return
         if self._drag_index is not None and (event.buttons() & Qt.LeftButton):
             self._drag_event_to(pos)
             return
@@ -1137,6 +1181,9 @@ class DayCell(QPushButton):
         self._set_canvas_over(self._canvas_rect().contains(pos))
         self._set_star_hover(
             self._has_journal and self._star_hit_rect().contains(pos))
+        # A vertical-resize cursor over an event box's lower edge.
+        self.setCursor(Qt.SizeVerCursor if self._event_resize_at(pos) is not None
+                       else Qt.PointingHandCursor)
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event) -> None:
@@ -1156,6 +1203,16 @@ class DayCell(QPushButton):
                 self.journal_open_requested.emit()   # expand + open the journal
                 event.accept()
                 return
+            ridx = self._event_resize_at(event.position())
+            if ridx is not None:
+                # Begin resizing this event box (drag the lower edge).
+                self._resize_index = ridx
+                self._resize_start_y = event.position().y()
+                self._resize_start_size = self._event_size_px(self._events[ridx])
+                self._resize_changed = False
+                self.setCursor(Qt.SizeVerCursor)
+                event.accept()
+                return
             idx = self._event_box_at(event.position())
             if idx is not None:
                 # Begin dragging this event box (don't select the day).
@@ -1169,6 +1226,14 @@ class DayCell(QPushButton):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._resize_index is not None:
+            idx = self._resize_index
+            self._resize_index = None
+            self.setCursor(Qt.PointingHandCursor)
+            if self._resize_changed and 0 <= idx < len(self._events):
+                self.event_resized.emit(idx, self._events[idx].size)
+            event.accept()
+            return
         if self._drag_index is not None:
             idx = self._drag_index
             self._drag_index = None
@@ -1472,7 +1537,6 @@ class DayCell(QPushButton):
             # so a box never spills past the frame.
             p.save()
             p.setClipRect(canvas)
-            p.setFont(self._event_font())
             for i, e in enumerate(self._events):
                 if not e.key:
                     continue  # empty (being typed into the inline editor)
@@ -1482,6 +1546,7 @@ class DayCell(QPushButton):
                 p.setPen(Qt.NoPen)
                 p.setBrush(bg)
                 p.drawRoundedRect(box, 3, 3)
+                p.setFont(self._event_font(self._event_size_px(e)))
                 p.setPen(QColor(t.TEXT))
                 p.drawText(box, Qt.AlignCenter, e.key)
             p.restore()
@@ -1953,6 +2018,7 @@ class MonthView(QWidget):
                 cell.event_add_requested.connect(self._on_event_add)
                 cell.event_edit_requested.connect(self._on_event_edit)
                 cell.event_moved.connect(self._on_event_moved)
+                cell.event_resized.connect(self._on_event_resized)
                 cell.event_delete_requested.connect(self._on_event_delete)
                 cell.event_repeat_requested.connect(self._on_event_repeat)
                 grid.addWidget(cell, r, c)
@@ -1984,6 +2050,16 @@ class MonthView(QWidget):
         # Dragging moves the whole series (one shared position); no prompt.
         occ = cell._events[index]
         self._events.set_position(occ.event_id, cell.date, x, y, "series")
+        self._refresh_events(cell, cell.date)
+
+    def _on_event_resized(self, index: int, size: float) -> None:
+        cell = self.sender()
+        if not isinstance(cell, DayCell) or cell.date is None:
+            return
+        if not 0 <= index < len(cell._events):
+            return
+        # Font size is a series-wide display property (like position); no prompt.
+        self._events.set_size(cell._events[index].event_id, size)
         self._refresh_events(cell, cell.date)
 
     def _on_event_delete(self, index: int) -> None:
@@ -2048,6 +2124,10 @@ class MonthView(QWidget):
         if self._event_editing is not None:
             self._commit_event_text()  # commit any editor already open
         self._event_editing = (cell, day, index)
+        # Match the editor's font to the event's size (WYSIWYG while typing).
+        efont = QFont(self._event_edit.font())
+        efont.setPixelSize(max(1, round(cell._event_size_px(events[index]))))
+        self._event_edit.setFont(efont)
         self._event_edit.setText(events[index].key)
         if not self._position_event_edit():
             self._event_editing = None

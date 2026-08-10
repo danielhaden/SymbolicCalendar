@@ -1,17 +1,25 @@
-"""A ``#name`` symbol picker attached to a QLineEdit.
+"""A ``#name`` symbol picker attached to a QLineEdit or QTextEdit.
 
-While the user edits, a ``#`` followed by letters opens a popup listing matching
+While the user types, a ``#`` followed by letters opens a popup listing matching
 symbols (from ``model.symbols``). Picking one replaces just that ``#token`` in
-place, so a label can mix ordinary text and symbols (``a #alpha b #beta``).
-Backspacing the ``#`` — or a space/other break — closes the popup and returns to
-plain typing. The popup never takes keyboard focus, so the editor keeps it (and
-its commit-on-focus-out behaviour is undisturbed).
+place, so text can mix ordinary words and symbols (``a #alpha b #beta``).
+Backspacing the ``#`` — or a space/other break — closes the popup. The popup
+never takes keyboard focus, so the editor keeps it (and its commit behaviour is
+undisturbed). Works with a single-line QLineEdit (event key) or a multi-line
+QTextEdit (event value); the popup follows the text cursor in the latter.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt
-from PySide6.QtWidgets import QLineEdit, QListWidget, QListWidgetItem, QWidget
+from PySide6.QtGui import QTextCursor
+from PySide6.QtWidgets import (
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QTextEdit,
+    QWidget,
+)
 
 from model.symbols import search_symbols
 
@@ -19,12 +27,13 @@ _MAX_ROWS = 8
 
 
 class SymbolCompleter(QObject):
-    """Drives the ``#`` symbol popup for one ``QLineEdit``."""
+    """Drives the ``#`` symbol popup for one text editor (QLineEdit/QTextEdit)."""
 
-    def __init__(self, edit: QLineEdit, host: QWidget) -> None:
+    def __init__(self, edit: QLineEdit | QTextEdit, host: QWidget) -> None:
         super().__init__(host)
         self._edit = edit
         self._host = host
+        self._multiline = isinstance(edit, QTextEdit)
         self._token: tuple[int, int] | None = None   # (index of '#', end/cursor)
         self._popup = QListWidget(host)
         self._popup.setObjectName("symbolPopup")
@@ -34,7 +43,7 @@ class SymbolCompleter(QObject):
         self._popup.hide()
         self._popup.itemClicked.connect(lambda _item: self._accept())
         edit.textChanged.connect(self._sync)
-        edit.cursorPositionChanged.connect(lambda *_: self._sync())
+        edit.cursorPositionChanged.connect(self._sync)
         edit.installEventFilter(self)
 
     def set_theme(self, theme) -> None:
@@ -55,14 +64,40 @@ class SymbolCompleter(QObject):
             """
         )
 
+    # -- editor adapters (QLineEdit vs QTextEdit) ------------------------
+    def _plain_text(self) -> str:
+        return self._edit.toPlainText() if self._multiline else self._edit.text()
+
+    def _cursor_pos(self) -> int:
+        if self._multiline:
+            return self._edit.textCursor().position()
+        return self._edit.cursorPosition()
+
+    def _replace(self, start: int, end: int, s: str) -> None:
+        if self._multiline:
+            cur = self._edit.textCursor()
+            cur.setPosition(start)
+            cur.setPosition(end, QTextCursor.KeepAnchor)
+            cur.insertText(s)
+            self._edit.setTextCursor(cur)
+        else:
+            text = self._edit.text()
+            self._edit.setText(text[:start] + s + text[end:])
+            self._edit.setCursorPosition(start + len(s))
+
+    def _anchor_below(self) -> QPoint:
+        """Top-left (in host coords) to place the popup: below the text cursor
+        for a QTextEdit, else below the whole line edit."""
+        if self._multiline:
+            rect = self._edit.cursorRect()
+            return self._edit.viewport().mapTo(self._host, rect.bottomLeft())
+        return self._edit.mapTo(self._host, QPoint(0, self._edit.height()))
+
     # -- token detection --------------------------------------------------
     def _current_token(self) -> tuple[int, int, str] | None:
-        """The ``#token`` the cursor is inside, as (start, end, query), or None.
-
-        Walks back over the run of letters/digits ending at the cursor; if a
-        ``#`` sits immediately before that run, it's an active token."""
-        text = self._edit.text()
-        end = self._edit.cursorPosition()
+        """The ``#token`` the cursor is inside, as (start, end, query), or None."""
+        text = self._plain_text()
+        end = self._cursor_pos()
         start = end
         while start > 0 and text[start - 1].isalnum():
             start -= 1
@@ -70,7 +105,7 @@ class SymbolCompleter(QObject):
             return (start - 1, end, text[start:end])
         return None
 
-    def _sync(self) -> None:
+    def _sync(self, *_args) -> None:
         tok = self._current_token()
         if tok is None:
             self._hide()
@@ -98,11 +133,11 @@ class SymbolCompleter(QObject):
             row_h = 20
         height = row_h * min(rows, _MAX_ROWS) + 6
         width = max(160, self._edit.width())
-        below = self._edit.mapTo(self._host, QPoint(0, self._edit.height()))
+        below = self._anchor_below()
         x = max(0, min(below.x(), self._host.width() - width))
         y = below.y()
         if y + height > self._host.height():   # flip above when no room below
-            y = self._edit.mapTo(self._host, QPoint(0, 0)).y() - height
+            y = max(0, y - height - 20)
         self._popup.setGeometry(x, y, width, height)
 
     def _hide(self) -> None:
@@ -117,10 +152,8 @@ class SymbolCompleter(QObject):
             return
         char = str(item.data(Qt.UserRole))
         start, end = self._token
-        text = self._edit.text()
-        self._hide()  # before setText, so the change doesn't re-open the popup
-        self._edit.setText(text[:start] + char + text[end:])
-        self._edit.setCursorPosition(start + len(char))
+        self._hide()  # before editing, so the change doesn't re-open the popup
+        self._replace(start, end, char)
 
     # -- key handling while the popup is open -----------------------------
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:

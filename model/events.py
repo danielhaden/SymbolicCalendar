@@ -1,20 +1,22 @@
 """Calendar event business logic, with recurrence.
 
-An :class:`Event` is a free-text label placed on a day's canvas. It occurs on
-its ``start`` date and, if it has a :class:`RecurrenceRule`, on every following
-day the rule matches (daily / weekly / monthly / yearly, an interval, and an
-optional end date). Individual occurrences can be overridden or skipped via
-``overrides`` (keyed by ISO date) — this is what powers "edit/delete just this
-one" versus "the whole series".
+An :class:`Event` is a key/value pair placed on a day. The **key** (a symbol or
+short label) is what the month grid shows; the **value** is longer free text
+(both support the ``#`` symbol lookup). The expanded day view lists events as
+``key : value``.
 
-Events are stored event-centric in ``events.json`` (``{"events": [...]}``). Old
-day-keyed files (``{"YYYY-MM-DD": [...]}``) are migrated on load — each old
-per-day event becomes a one-off event on that date.
+An event occurs on its ``start`` date and, with a :class:`RecurrenceRule`, on
+every following day the rule matches (daily / weekly / monthly / yearly, an
+interval, and an optional end date). Individual occurrences can be overridden or
+skipped via ``overrides`` (keyed by ISO date) — this powers "edit/delete just
+this one" versus "the whole series".
+
+Events are stored event-centric in ``events.json`` (``{"events": [...]}``).
+Older files are migrated on load: day-keyed ``{"YYYY-MM-DD": [...]}`` files, and
+the earlier ``text``/``notes`` field names (now ``key``/``value``).
 
 The UI works with :class:`Occurrence` objects (a resolved event on a specific
-day, overrides applied) obtained from :meth:`Events.occurrences_on`. The legacy
-``get``/``add``/``move``/``update``/``remove`` day+index methods remain as thin
-wrappers so existing callers keep working.
+day, overrides applied) from :meth:`Events.occurrences_on`.
 """
 
 from __future__ import annotations
@@ -44,6 +46,16 @@ def _parse_date(value: object) -> date | None:
         return date.fromisoformat(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _norm_override(v: dict) -> dict:
+    """Normalise an override dict, migrating old text/notes field names."""
+    out = dict(v)
+    if "text" in out and "key" not in out:
+        out["key"] = out.pop("text")
+    if "notes" in out and "value" not in out:
+        out["value"] = out.pop("notes")
+    return out
 
 
 @dataclass
@@ -88,17 +100,18 @@ class RecurrenceRule:
 class Event:
     """A calendar event (one-off, or a recurring series).
 
-    ``text`` is the ≤20-char label; ``x``/``y`` are the box centre as canvas
-    fractions; ``notes`` holds longer detail. ``start`` is the first occurrence.
-    ``recur`` is None for a one-off. ``overrides`` maps an occurrence's ISO date
-    to a change: ``{"deleted": true}`` to skip it, or any of text/x/y/notes to
-    modify just that occurrence.
+    ``key`` is the ≤20-char label the month grid shows (a symbol or short
+    string); ``value`` is the longer free-text detail. ``x``/``y`` are the key's
+    box centre as canvas fractions. ``start`` is the first occurrence; ``recur``
+    is None for a one-off. ``overrides`` maps an occurrence's ISO date to a
+    change: ``{"deleted": true}`` to skip it, or any of key/value/x/y to modify
+    just that occurrence.
     """
 
-    text: str
+    key: str
+    value: str = ""
     x: float = 0.5
     y: float = 0.5
-    notes: str = ""
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     start: date | None = None
     recur: RecurrenceRule | None = None
@@ -106,8 +119,8 @@ class Event:
 
     def to_dict(self) -> dict:
         d: dict = {
-            "id": self.id, "text": self.text, "x": self.x, "y": self.y,
-            "notes": self.notes,
+            "id": self.id, "key": self.key, "value": self.value,
+            "x": self.x, "y": self.y,
             "start": (self.start or date.today()).isoformat(),
         }
         if self.recur is not None:
@@ -118,7 +131,8 @@ class Event:
 
     @staticmethod
     def from_dict(d: dict) -> "Event | None":
-        if not d.get("text"):
+        key = d.get("key") or d.get("text")  # "text" is the pre-rename name
+        if not key:
             return None
         start = _parse_date(d.get("start"))
         if start is None:
@@ -128,13 +142,14 @@ class Event:
         if isinstance(raw, dict):
             for k, v in raw.items():
                 if _parse_date(k) is not None and isinstance(v, dict):
-                    overrides[str(k)] = v
+                    overrides[str(k)] = _norm_override(v)
         recur = None
         if isinstance(d.get("recur"), dict):
             recur = RecurrenceRule.from_dict(d["recur"])
+        value = d.get("value", d.get("notes", ""))  # "notes" pre-rename
         return Event(
-            text=str(d["text"]), x=_clamp01(d.get("x", 0.5)),
-            y=_clamp01(d.get("y", 0.5)), notes=str(d.get("notes", "")),
+            key=str(key), value=str(value), x=_clamp01(d.get("x", 0.5)),
+            y=_clamp01(d.get("y", 0.5)),
             id=str(d.get("id") or uuid.uuid4().hex), start=start,
             recur=recur, overrides=overrides,
         )
@@ -148,10 +163,10 @@ class Occurrence:
 
     event_id: str
     day: date
-    text: str
+    key: str
+    value: str
     x: float
     y: float
-    notes: str
     recurring: bool
 
 
@@ -196,13 +211,13 @@ def _resolve(event: Event, day: date) -> Occurrence | None:
     ov = event.overrides.get(day.isoformat())
     if ov and ov.get("deleted"):
         return None
-    text, x, y, notes = event.text, event.x, event.y, event.notes
+    key, value, x, y = event.key, event.value, event.x, event.y
     if ov:
-        text = str(ov.get("text", text))
+        key = str(ov.get("key", key))
+        value = str(ov.get("value", value))
         x = _clamp01(ov.get("x", x))
         y = _clamp01(ov.get("y", y))
-        notes = str(ov.get("notes", notes))
-    return Occurrence(event.id, day, text, x, y, notes, event.recur is not None)
+    return Occurrence(event.id, day, key, value, x, y, event.recur is not None)
 
 
 class Events:
@@ -223,25 +238,30 @@ class Events:
         if not isinstance(data, dict):
             return
         if isinstance(data.get("events"), list):
+            migrated = False
             for d in data["events"]:
                 if isinstance(d, dict):
                     ev = Event.from_dict(d)
                     if ev is not None:
                         self._events.append(ev)
+                        migrated = migrated or "key" not in d
+            if migrated:
+                self._save()  # normalise old text/notes field names on disk
         else:
             self._migrate_day_keyed(data)  # legacy {date: [events]}
 
     def _migrate_day_keyed(self, data: dict) -> None:
-        for key, items in data.items():
-            day = _parse_date(key)
+        for daykey, items in data.items():
+            day = _parse_date(daykey)
             if day is None or not isinstance(items, list):
                 continue
             for it in items:
-                if isinstance(it, dict) and it.get("text"):
+                label = isinstance(it, dict) and (it.get("key") or it.get("text"))
+                if label:
                     self._events.append(Event(
-                        text=str(it["text"]), x=_clamp01(it.get("x", 0.5)),
-                        y=_clamp01(it.get("y", 0.5)),
-                        notes=str(it.get("notes", "")), start=day,
+                        key=str(label), value=str(it.get("value", it.get("notes", ""))),
+                        x=_clamp01(it.get("x", 0.5)), y=_clamp01(it.get("y", 0.5)),
+                        start=day,
                     ))
         if self._events:
             self._save()  # rewrite in the new format
@@ -267,14 +287,22 @@ class Events:
                 out.append(occ)
         return out
 
+    def get(self, day: date) -> list[Occurrence]:
+        """Alias for :meth:`occurrences_on` (what the month view renders)."""
+        return self.occurrences_on(day)
+
+    def keys(self, day: date) -> list[str]:
+        """Just the keys occurring on ``day`` (what the grid canvas renders)."""
+        return [o.key for o in self.occurrences_on(day)]
+
     def event(self, event_id: str) -> Event | None:
         return next((e for e in self._events if e.id == event_id), None)
 
     # -- scoped mutations (event-id based) -------------------------------
-    def add_event(self, day: date, text: str = "", x: float = 0.5,
+    def add_event(self, day: date, key: str = "", x: float = 0.5,
                   y: float = 0.5) -> Event:
         """Create a one-off event on ``day`` and return it."""
-        ev = Event(text=text, x=_clamp01(x), y=_clamp01(y), start=day)
+        ev = Event(key=key, x=_clamp01(x), y=_clamp01(y), start=day)
         self._events.append(ev)
         self._save()
         return ev
@@ -282,14 +310,24 @@ class Events:
     def _override(self, ev: Event, day: date) -> dict:
         return ev.overrides.setdefault(day.isoformat(), {})
 
-    def set_text(self, event_id: str, day: date, text: str, scope: str) -> None:
+    def set_key(self, event_id: str, day: date, key: str, scope: str) -> None:
         ev = self.event(event_id)
         if ev is None:
             return
         if scope == "this" and ev.recur is not None:
-            self._override(ev, day)["text"] = text
+            self._override(ev, day)["key"] = key
         else:
-            ev.text = text
+            ev.key = key
+        self._save()
+
+    def set_value(self, event_id: str, day: date, value: str, scope: str) -> None:
+        ev = self.event(event_id)
+        if ev is None:
+            return
+        if scope == "this" and ev.recur is not None:
+            self._override(ev, day)["value"] = value
+        else:
+            ev.value = value
         self._save()
 
     def set_position(self, event_id: str, day: date, x: float, y: float,
@@ -303,16 +341,6 @@ class Events:
             ov["x"], ov["y"] = x, y
         else:
             ev.x, ev.y = x, y
-        self._save()
-
-    def set_notes(self, event_id: str, day: date, notes: str, scope: str) -> None:
-        ev = self.event(event_id)
-        if ev is None:
-            return
-        if scope == "this" and ev.recur is not None:
-            self._override(ev, day)["notes"] = notes
-        else:
-            ev.notes = notes
         self._save()
 
     def delete(self, event_id: str, day: date, scope: str) -> None:
@@ -332,36 +360,6 @@ class Events:
             return
         ev.recur = rule
         self._save()
-
-    # -- legacy day+index API (kept for existing callers) ----------------
-    def get(self, day: date) -> list[Occurrence]:
-        return self.occurrences_on(day)
-
-    def texts(self, day: date) -> list[str]:
-        return [o.text for o in self.occurrences_on(day)]
-
-    def add(self, day: date, event: Event) -> None:
-        event.start = day
-        self._events.append(event)
-        self._save()
-
-    def move(self, day: date, index: int, x: float, y: float) -> None:
-        occ = self.occurrences_on(day)
-        if 0 <= index < len(occ):
-            self.set_position(occ[index].event_id, day, x, y, "series")
-
-    def update(self, day: date, index: int, event: Event) -> None:
-        occ = self.occurrences_on(day)
-        if 0 <= index < len(occ):
-            eid = occ[index].event_id
-            self.set_text(eid, day, event.text, "series")
-            self.set_position(eid, day, event.x, event.y, "series")
-            self.set_notes(eid, day, event.notes, "series")
-
-    def remove(self, day: date, index: int) -> None:
-        occ = self.occurrences_on(day)
-        if 0 <= index < len(occ):
-            self.delete(occ[index].event_id, day, "series")
 
     # -- data folder -----------------------------------------------------
     def folder(self) -> Path:

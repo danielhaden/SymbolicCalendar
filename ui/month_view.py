@@ -1379,15 +1379,14 @@ class DayCell(QPushButton):
     # -- journal star (grid tiles) ---------------------------------------
     def _star_geom(self) -> tuple[float, float, float]:
         """Centre (cx, cy) and outer radius of the journal star: snug to the
-        right of the date number. Uses the number's *current* font (which grows
-        when a hovered/today tile emphasises it), so the star stays beside the
-        number in every state rather than leaving a gap."""
+        right of the date number, matching the number's font so it stays beside
+        it (the number only bolds on emphasis now, it doesn't resize)."""
         s = self._paint_scale()
         bars = self._bars_width()
         left = ((bars + 4) if bars else 9) * s
         emphasize = self._today or self._hover or self._standalone
         font = QFont(self.font())
-        font.setPixelSize(max(1, round((23 if emphasize else 13) * s)))
+        font.setPixelSize(max(1, round((23 if self._standalone else 13) * s)))
         font.setBold(emphasize)
         fm = QFontMetricsF(font)
         num_w = fm.horizontalAdvance(str(self._date.day)) if self._date else 0.0
@@ -1639,14 +1638,14 @@ class DayCell(QPushButton):
             p.restore()
 
         # --- Date number, top-left. Greyscale only: emphasis comes from
-        # styling, not color. Today, the hovered tile, and the expanded tile
-        # are bold + larger; weekends are italic; the expanded tile underlines
-        # today. (Tiles are no longer "selected" in the grid.) ---
+        # styling, not color. Today and the hovered tile are bold (but the same
+        # size as any other day); weekends are italic; the expanded tile is
+        # larger and underlines today. (Tiles are no longer "selected".) ---
         num_color = QColor(t.TEXT_FAINT) if not self._in_month else QColor(t.TEXT)
         emphasize = self._today or self._hover or self._standalone
 
         font = QFont(self.font())
-        font.setPixelSize(max(1, round((23 if emphasize else 13) * s)))
+        font.setPixelSize(max(1, round((23 if self._standalone else 13) * s)))
         font.setBold(emphasize)
         font.setItalic(self._weekend)
         font.setUnderline(self._standalone and self._today)

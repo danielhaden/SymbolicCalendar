@@ -5,9 +5,10 @@ from here. Each entry has a display ``char``, a primary ``name``, and optional
 extra ``keywords`` (including its set name, so e.g. ``#arrow`` lists the arrows).
 
 Sets so far: Greek letters, math/logic, arrows, astrological glyphs, weather,
-astronomy, everyday objects, and esoteric concepts. All are plain Unicode, so
-they render in the app's normal text pipeline with no bundled fonts. Add more by
-appending a builder below — no UI change needed.
+astronomy, everyday objects, esoteric concepts, and the cursive (Mathematical
+Script) alphabet. All are plain Unicode, so they render in the app's normal text
+pipeline with no bundled fonts. Add more by appending a builder below — no UI
+change needed.
 """
 
 from __future__ import annotations
@@ -175,11 +176,32 @@ def _concept_symbols() -> list[Symbol]:
     return [Symbol(ch + _VS, name, ("concept", *kw)) for name, ch, kw in data]
 
 
+def _cursive_symbols() -> list[Symbol]:
+    """The Mathematical Script (cursive) alphabet. Most letters come from the
+    Mathematical Alphanumeric block; the handful reserved there (because they
+    live in Letterlike Symbols) are substituted. Search each by its plain
+    letter, and the whole set with ``#cursive`` / ``#script``."""
+    up_base, lo_base = 0x1D49C, 0x1D4B6
+    up_hole = {"B": 0x212C, "E": 0x2130, "F": 0x2131, "H": 0x210B,
+               "I": 0x2110, "L": 0x2112, "M": 0x2133, "R": 0x211B}
+    lo_hole = {"e": 0x212F, "g": 0x210A, "o": 0x2134}
+    out: list[Symbol] = []
+    for i in range(26):
+        ch = chr(ord("a") + i)  # name is the bare letter: "#a" -> cursive a
+        out.append(Symbol(chr(lo_hole.get(ch, lo_base + i)), ch,
+                          ("cursive", "script")))
+    for i in range(26):
+        ch = chr(ord("A") + i)
+        out.append(Symbol(chr(up_hole.get(ch, up_base + i)), ch,
+                          ("cursive", "script")))
+    return out
+
+
 # The active library. Extend by appending more builders' output here.
 SYMBOLS: list[Symbol] = (
     _greek_symbols() + _math_symbols() + _arrow_symbols() + _astro_symbols()
     + _weather_symbols() + _astronomy_symbols() + _object_symbols()
-    + _concept_symbols()
+    + _concept_symbols() + _cursive_symbols()
 )
 
 

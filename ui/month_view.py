@@ -1182,11 +1182,13 @@ class DayCell(QPushButton):
 
     def mouseDoubleClickEvent(self, event) -> None:
         if self._standalone:
+            # Don't chain to super(): QAbstractButton's double-click calls
+            # mousePressEvent, which on the standalone tile emits tile_pressed
+            # and would immediately save/close the value editor we're opening.
             if self._date is not None:
                 idx = self._event_at(event.position())
                 if idx is not None:
-                    self.event_note_requested.emit(idx)  # edit this event's note
-            super().mouseDoubleClickEvent(event)
+                    self.event_note_requested.emit(idx)  # edit this event's value
             return
         if self._date is not None and event.button() == Qt.LeftButton:
             if self._has_journal \

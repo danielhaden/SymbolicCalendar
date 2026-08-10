@@ -5,9 +5,9 @@ from here. Each entry has a display ``char``, a primary ``name``, and optional
 extra ``keywords`` (including its set name, so e.g. ``#arrow`` lists the arrows).
 
 Sets so far: Greek letters, math/logic, arrows, astrological glyphs, weather,
-and astronomy. All are plain Unicode, so they render in the app's normal text
-pipeline with no bundled fonts. Add more by appending a builder below — no UI
-change needed.
+astronomy, everyday objects, and esoteric concepts. All are plain Unicode, so
+they render in the app's normal text pipeline with no bundled fonts. Add more by
+appending a builder below — no UI change needed.
 """
 
 from __future__ import annotations
@@ -144,10 +144,42 @@ def _astronomy_symbols() -> list[Symbol]:
     return [Symbol(ch + _VS, name, ("astronomy", *kw)) for name, ch, kw in data]
 
 
+def _object_symbols() -> list[Symbol]:
+    data = (
+        ("pencil", "✏", ("write",)), ("pen", "✒", ("nib", "write")),
+        ("scissors", "✂", ("cut",)), ("phone", "☎", ("telephone",)),
+        ("envelope", "✉", ("mail", "letter")), ("gear", "⚙", ("cog", "settings")),
+        ("scales", "⚖", ("balance",)), ("hourglass", "⌛", ("sand", "time")),
+        ("watch", "⌚", ("clock", "time")), ("anchor", "⚓", ()),
+        ("key", "⚿", ("lock",)), ("hammer", "⚒", ("tool", "pick")),
+        ("swords", "⚔", ("sword", "battle")), ("alembic", "⚗", ("still", "flask")),
+        ("keyboard", "⌨", ("type",)), ("flag", "⚑", ()),
+        ("flower", "✿", ("blossom",)),
+    )
+    return [Symbol(ch + _VS, name, ("object", *kw)) for name, ch, kw in data]
+
+
+def _concept_symbols() -> list[Symbol]:
+    # An esoteric / hermetic reading: the alchemical tria prima and elements
+    # plus a few astrological and traditional signs. (Easy to re-map.)
+    data = (
+        ("soul", "🜍", ("sulphur", "sulfur")), ("spirit", "☿", ("mercury",)),
+        ("body", "🜔", ("salt",)), ("will", "☉", ("sun",)),
+        ("judgement", "⚖", ("justice", "scales")), ("life", "☥", ("ankh",)),
+        ("death", "☠", ("skull",)), ("love", "♡", ("heart",)),
+        ("peace", "☮", ()), ("balance", "☯", ("harmony", "yinyang")),
+        ("fate", "☸", ("karma", "dharma", "wheel")), ("fortune", "⊕", ("luck",)),
+        ("fire", "🜂", ("element",)), ("water", "🜄", ("element",)),
+        ("air", "🜁", ("element",)), ("earth", "🜃", ("element",)),
+    )
+    return [Symbol(ch + _VS, name, ("concept", *kw)) for name, ch, kw in data]
+
+
 # The active library. Extend by appending more builders' output here.
 SYMBOLS: list[Symbol] = (
     _greek_symbols() + _math_symbols() + _arrow_symbols() + _astro_symbols()
-    + _weather_symbols() + _astronomy_symbols()
+    + _weather_symbols() + _astronomy_symbols() + _object_symbols()
+    + _concept_symbols()
 )
 
 

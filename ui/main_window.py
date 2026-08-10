@@ -188,6 +188,11 @@ class MainWindow(QMainWindow):
         self._bars_horizontal = self._settings.value(
             "view/bars_horizontal", True, type=bool)
         self._month_view.set_bars_horizontal(self._bars_horizontal)
+        # The top-right moon-phase glyph is a persisted preference, hidden by
+        # default (the daylight/moon bars already convey the phase).
+        self._show_moon_phase = self._settings.value(
+            "view/show_moon_phase", False, type=bool)
+        self._month_view.set_moon_glyph_visible(self._show_moon_phase)
         # Central column: an (initially hidden) update banner over the month view.
         self._update_banner = _UpdateBanner(self._theme)
         central = QWidget()
@@ -263,6 +268,11 @@ class MainWindow(QMainWindow):
         self._settings.setValue("view/bars_horizontal", horizontal)
         self._month_view.set_bars_horizontal(horizontal)
 
+    def _on_toggle_moon_phase(self, visible: bool) -> None:
+        self._show_moon_phase = visible
+        self._settings.setValue("view/show_moon_phase", visible)
+        self._month_view.set_moon_glyph_visible(visible)
+
     def _on_set_daylight_mode(self, mode: str) -> None:
         self._daylight_mode = mode
         self._settings.setValue("view/daylight_mode", mode)
@@ -316,6 +326,11 @@ class MainWindow(QMainWindow):
         moonbar_action.setCheckable(True)
         moonbar_action.setChecked(True)
         moonbar_action.toggled.connect(self._month_view.set_moon_bar_visible)
+
+        moonphase_action = view_menu.addAction("Show Moon Phase")
+        moonphase_action.setCheckable(True)
+        moonphase_action.setChecked(self._show_moon_phase)  # persisted; off by default
+        moonphase_action.toggled.connect(self._on_toggle_moon_phase)
 
         ascendant_action = view_menu.addAction("Show Ascendant")
         ascendant_action.setCheckable(True)

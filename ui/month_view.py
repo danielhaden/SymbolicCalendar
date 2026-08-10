@@ -308,6 +308,7 @@ class DayCell(QPushButton):
         self._is_hovered_bar = False   # this cell's bar is the one hovered
         self._hover_progress = 0.0     # fade amount for the overlay
         self._show_daylight = True     # View menu toggle
+        self._show_moon_glyph = True   # top-right moon-phase glyph (View menu)
         # Standalone (expanded) tile: an enlarged copy of a grid tile that
         # fills the month view; its day number collapses it back, and its
         # lower-right journal corner opens the entry editor.
@@ -1032,6 +1033,11 @@ class DayCell(QPushButton):
             self._show_moon_bar = visible
             self.update()
 
+    def set_moon_glyph_visible(self, visible: bool) -> None:
+        if visible != self._show_moon_glyph:
+            self._show_moon_glyph = visible
+            self.update()
+
     def set_ascendant_visible(self, visible: bool) -> None:
         if visible != self._show_ascendant:
             self._show_ascendant = visible
@@ -1332,6 +1338,7 @@ class DayCell(QPushButton):
         self._marks_scroll = 0.0
         self._daylight = other._daylight
         self._show_daylight = other._show_daylight
+        self._show_moon_glyph = other._show_moon_glyph
         self._moonlight = other._moonlight
         self._show_moon_bar = other._show_moon_bar
         self._ascendant = other._ascendant
@@ -1582,7 +1589,8 @@ class DayCell(QPushButton):
                     p.setFont(tfont)
                     p.drawText(QRectF(0, cy - 9 * s, cx - 11 * s, 18 * s),
                                Qt.AlignRight | Qt.AlignVCenter, self._ingress_time)
-        elif not self._standalone and self._lunation is not None:
+        elif not self._standalone and self._show_moon_glyph \
+                and self._lunation is not None:
             # Faint full-disc outline marks the unlit limb (visible at new moon).
             outline = QColor(t.MOON)
             outline.setAlpha(int(full_alpha * 0.45))
@@ -2306,6 +2314,12 @@ class MonthView(QWidget):
         for c in self._cells:
             c.set_moon_bar_visible(visible)
         self._expanded.set_moon_bar_visible(visible)
+
+    def set_moon_glyph_visible(self, visible: bool) -> None:
+        """Show/hide the top-right moon-phase glyph across the month (View menu)."""
+        for c in self._cells:
+            c.set_moon_glyph_visible(visible)
+        self._expanded.set_moon_glyph_visible(visible)
 
     def set_ascendant_visible(self, visible: bool) -> None:
         """Show/hide the rising-sign band across the whole month (View menu)."""

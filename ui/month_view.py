@@ -59,15 +59,11 @@ from model import (
     current_location,
     daylight,
     ingresses_on,
-    stations_on,
-    moon_aspects,
-    moon_ingress_at,
     moon_phase,
     moon_void_begins,
     moonlight,
-    planet_ingress,
-    planet_station,
     planets_in_signs,
+    stations_on,
 )
 from .propagate_dialog import PropagateDialog
 from .recurrence_dialog import RecurrenceDialog
@@ -104,22 +100,6 @@ PLANETS = [
 _PLANET_GLYPHS = {key: glyph + _VS_TEXT for key, _, glyph in PLANETS}
 # Bodies shown stacked in the ascendant band: the luminaries plus the planets.
 _BODY_GLYPHS = {"sun": "☉" + _VS_TEXT, "moon": "☽" + _VS_TEXT, **_PLANET_GLYPHS}
-
-# Retrograde station arrows: left when a planet stations retrograde, right
-# when it stations direct (drawn under the planet glyph).
-_STATION_ARROWS = {"retrograde": "←", "direct": "→"}
-
-# Major-aspect glyphs for the Moon's aspects to planets. A begin mark reads
-# "<planet><aspect>" (the Moon coming to the aspect); an end mark reads
-# "<aspect><planet>" (the Moon leaving it). The trailing U+FE0E keeps the
-# glyphs monochrome rather than falling back to colour emoji.
-_ASPECT_GLYPHS = {
-    "conjunction": "☌" + _VS_TEXT,   # ☌
-    "sextile": "⚹" + _VS_TEXT,       # ⚹
-    "square": "□" + _VS_TEXT,        # □
-    "trine": "△" + _VS_TEXT,         # △
-    "opposition": "☍" + _VS_TEXT,    # ☍
-}
 
 # Time bars: the daylight and moon bars share one strip along the tile edge
 # (left when vertical, bottom when horizontal). Both are filled with a thick,
@@ -323,20 +303,8 @@ class DayCell(QPushButton):
         self._journal_hover = False
         self._theme: Theme | None = None
         self._lunation: Lunation | None = None
-        self._ingress_sign: str | None = None  # moon-ingress zodiac abbrev
-        self._ingress_time: str | None = None  # local 'HH:MM' the Moon ingresses
         self._has_journal = False               # day has a journal entry
-        self._ingress_marks: list[str] = []     # planet-ingress mark strings
-        # planet-retrograde-station marks: (planet glyph, arrow) pairs.
-        self._station_marks: list[tuple[str, str]] = []
-        # Moon-aspect marks (already-composed glyph strings) and the void-of-
-        # course flag, both stacked with the other astrological symbols.
-        self._aspect_marks: list[str] = []
-        self._void_begin: str | None = None      # 'HH:MM' the void starts
-        self._show_aspects = True                # View menu toggle
-        # When the astro-mark stack overflows the tile it scrolls within its
-        # right-hand strip (mouse wheel; no scrollbar). This is the offset.
-        self._marks_scroll = 0.0
+        self._void_begin: str | None = None      # 'HH:MM' the void begins
         self._daylight: Daylight | None = None
         # Moon-rise/set bar: the Moon's above-horizon span(s) for the day; a
         # second left-edge bar, toggled independently of the daylight bar.
@@ -436,11 +404,6 @@ class DayCell(QPushButton):
         in_month: bool,
         is_today: bool,
         lunation: Lunation | None,
-        ingress_sign: str | None,
-        ingress_time: str | None,
-        ingress_marks: list[str],
-        station_marks: list[tuple[str, str]],
-        aspect_marks: list[str],
         void_begins: str | None,
         daylight: Daylight | None,
         moonlight: Moonlight | None,
@@ -457,13 +420,7 @@ class DayCell(QPushButton):
         self._today = is_today
         self._weekend = day.weekday() >= 5
         self._lunation = lunation
-        self._ingress_sign = ingress_sign
-        self._ingress_time = ingress_time
-        self._ingress_marks = ingress_marks
-        self._station_marks = station_marks
-        self._aspect_marks = aspect_marks
         self._void_begin = void_begins
-        self._marks_scroll = 0.0
         self._daylight = daylight
         self._moonlight = moonlight
         self._ascendant = ascendant
@@ -1214,50 +1171,7 @@ class DayCell(QPushButton):
             self._set_moon_hover(None)
             self.update()
 
-    def set_aspects_visible(self, visible: bool) -> None:
-        if visible != self._show_aspects:
-            self._show_aspects = visible
-            self.update()
-
-    # -- astrological mark stack (scrollable when it overflows) -----------
-    def _visible_marks(self) -> list[str]:
-        """The right-hand mark stack is now empty — all of its astro elements
-        (ingresses, retrograde/direct stations, void-of-course) live in the
-        ascendant band at the bottom."""
-        return []
-
-    def _marks_rect(self) -> QRectF:
-        """The right-hand strip the mark stack is drawn (and scrolled) within:
-        below the moon glyph, down to clear of the journal corner. Wide enough
-        for the void-of-course "HH:MM x" line."""
-        s = self._paint_scale()
-        top = 17.0 * s + _MOON_RADIUS * s + 4.0 * s   # just below the moon glyph
-        bottom = self.height() - self._bars_height() * s - (
-            _CANVAS_MARGIN * s if self._standalone else 14.0 * s)
-        left = self.width() - 54.0 * s
-        return QRectF(left, top, self.width() - left, max(0.0, bottom - top))
-
-    def _marks_overflow(self) -> float:
-        """How far the stack extends past its strip (0 if it all fits)."""
-        line = 12.0 * self._paint_scale()
-        content = len(self._visible_marks()) * line
-        return max(0.0, content - self._marks_rect().height())
-
-    def _clamp_marks_scroll(self) -> None:
-        self._marks_scroll = max(0.0, min(self._marks_scroll,
-                                          self._marks_overflow()))
-
     def wheelEvent(self, event) -> None:
-        # Scroll the mark stack only while the cursor is over its strip and it
-        # actually overflows; otherwise let the event propagate normally.
-        if self._date is not None and self._marks_overflow() > 0 \
-                and self._marks_rect().contains(event.position()):
-            line = 12.0 * self._paint_scale()
-            self._marks_scroll -= event.angleDelta().y() / 120.0 * line
-            self._clamp_marks_scroll()
-            self.update()
-            event.accept()
-            return
         # No zoom/scroll over the event canvas — swallow the wheel there.
         if self._date is not None and not self._standalone \
                 and self._canvas_rect().contains(event.position()):
@@ -1489,14 +1403,7 @@ class DayCell(QPushButton):
         self._today = other._today
         self._weekend = other._weekend
         self._lunation = other._lunation
-        self._ingress_sign = other._ingress_sign
-        self._ingress_time = other._ingress_time
-        self._ingress_marks = other._ingress_marks
-        self._station_marks = other._station_marks
-        self._aspect_marks = other._aspect_marks
         self._void_begin = other._void_begin
-        self._show_aspects = other._show_aspects
-        self._marks_scroll = 0.0
         self._daylight = other._daylight
         self._show_daylight = other._show_daylight
         self._show_moon_glyph = other._show_moon_glyph
@@ -1753,35 +1660,6 @@ class DayCell(QPushButton):
                 self._lunation.display_illumination, self._lunation.is_waxing,
             ))
 
-        # --- Astro marks, stacked right-aligned below the moon glyph: planet
-        # ingresses ("<planet>:<sign>"), retrograde stations ("<planet>:<arrow>",
-        # left = retrograde, right = direct), then the Moon's aspects (begin =
-        # "<planet><aspect>", end = "<aspect><planet>") and a void-of-course
-        # "x". When the stack is taller than its strip it scrolls (mouse wheel,
-        # no scrollbar); drawing is clipped to the strip so it never spills onto
-        # the journal corner or other elements. ---
-        marks = self._visible_marks()
-        if marks and not self._standalone:
-            self._clamp_marks_scroll()  # stay valid as the day's marks change
-            mrect = self._marks_rect()
-            right = QRectF(2, 0, w - 5 * s, 13 * s)
-            line = 12 * s
-            font = QFont(self.font())
-            p.setPen(base)
-            p.save()
-            p.setClipRect(mrect)
-            y = mrect.top() - self._marks_scroll
-            for mark in marks:
-                if y < mrect.bottom() and y + 13 * s > mrect.top():
-                    # The void-of-course time is drawn smaller, matching the
-                    # sign-ingress time; aspect/ingress glyphs stay at 11.
-                    size = 10 if mark is self._void_begin else 11
-                    font.setPixelSize(max(1, round(size * s)))
-                    p.setFont(font)
-                    p.drawText(right.translated(0, y),
-                               Qt.AlignRight | Qt.AlignVCenter, mark)
-                y += line
-            p.restore()
 
         # --- Date number, top-left. Greyscale only: emphasis comes from
         # styling, not color. Today and the hovered tile are bold (but the same
@@ -2468,12 +2346,6 @@ class MonthView(QWidget):
         for c in self._cells:
             c.set_daylight_visible(visible)
 
-    def set_aspects_visible(self, visible: bool) -> None:
-        """Show/hide the Moon-aspect and void-of-course marks (View menu)."""
-        for c in self._cells:
-            c.set_aspects_visible(visible)
-        self._expanded.set_aspects_visible(visible)
-
     def set_moon_bar_visible(self, visible: bool) -> None:
         """Show/hide the moon-rise/set bar across the whole month (View menu)."""
         for c in self._cells:
@@ -2520,32 +2392,6 @@ class MonthView(QWidget):
             self._enabled_retro.discard(planet)
         self._refresh()
 
-    def _planet_marks(self, day, location) -> list[str]:
-        """Ingress marks for the enabled planets entering a sign on ``day``."""
-        marks = []
-        for key, _, _ in PLANETS:
-            if key not in self._enabled_planets:
-                continue
-            sign = planet_ingress(key, day, location)
-            if sign:
-                sign_glyph = _SIGN_GLYPHS.get(sign)
-                if sign_glyph:
-                    marks.append(f"{_PLANET_GLYPHS[key]}:{sign_glyph}")
-        return marks
-
-    def _moon_aspect_marks(self, day, location) -> list[str]:
-        """Composed glyph strings for the Moon's aspects on ``day``: planet then
-        aspect where the aspect begins, aspect then planet where it ends."""
-        marks = []
-        for a in moon_aspects(day, location):
-            planet = _PLANET_GLYPHS.get(a.planet, "")
-            aspect = _ASPECT_GLYPHS.get(a.aspect, "")
-            if not planet or not aspect:
-                continue
-            marks.append(planet + aspect if a.phase == "begin"
-                         else aspect + planet)
-        return marks
-
     def _moon_span_labels(self, day) -> list[tuple[str | None, str | None]]:
         """For each of the day's moon-up spans, the (moonrise, moonset) clock
         labels — but only the events that actually occur on this day. A span
@@ -2561,17 +2407,6 @@ class MonthView(QWidget):
             sets = ml.set_label if b < 1.0 - 1e-6 else None  # sets the next day
             labels.append((rise, sets))
         return labels
-
-    def _station_marks(self, day, location) -> list[tuple[str, str]]:
-        """Retrograde-station marks (glyph, arrow) for the enabled planets."""
-        marks = []
-        for key, _, _ in PLANETS:
-            if key not in self._enabled_retro:
-                continue
-            station = planet_station(key, day, location)
-            if station:
-                marks.append((_PLANET_GLYPHS[key], _STATION_ARROWS[station]))
-        return marks
 
     def _dl_reset(self) -> None:
         """Tear down any daylight-hover overlay (e.g. when the month changes)."""
@@ -2678,25 +2513,23 @@ class MonthView(QWidget):
             row, col = divmod(idx, 7)
             if row < len(weeks):
                 day = weeks[row][col]
-                ingress = moon_ingress_at(day, location)
                 cell.setVisible(True)
                 cell.set_day(
                     day,
                     in_month=self._model.is_in_displayed_month(day),
                     is_today=(day == today),
                     lunation=moon_phase(day),
-                    ingress_sign=ingress[0] if ingress else None,
-                    ingress_time=ingress[1] if ingress else None,
-                    ingress_marks=self._planet_marks(day, location),
-                    station_marks=self._station_marks(day, location),
-                    aspect_marks=self._moon_aspect_marks(day, location),
                     void_begins=moon_void_begins(day, location),
                     daylight=daylight(day),
                     moonlight=moonlight(day),
                     ascendant=ascendant(day, location),
                     asc_planets=planets_in_signs(day, location),
-                    asc_ingresses=ingresses_on(day, location),
-                    asc_stations=stations_on(day, location),
+                    asc_ingresses={
+                        k: v for k, v in ingresses_on(day, location).items()
+                        if k in ("sun", "moon") or k in self._enabled_planets},
+                    asc_stations={
+                        k: v for k, v in stations_on(day, location).items()
+                        if k in self._enabled_retro},
                     moon_labels=self._moon_span_labels(day),
                     has_journal=self._journal.has(day),
                     events=self._events.get(day),

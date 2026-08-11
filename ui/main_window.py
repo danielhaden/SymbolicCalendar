@@ -337,11 +337,6 @@ class MainWindow(QMainWindow):
         ascendant_action.setChecked(True)
         ascendant_action.toggled.connect(self._month_view.set_ascendant_visible)
 
-        aspects_action = view_menu.addAction("Show Moon Aspects")
-        aspects_action.setCheckable(True)
-        aspects_action.setChecked(True)
-        aspects_action.toggled.connect(self._month_view.set_aspects_visible)
-
         ingress_menu = view_menu.addMenu("Planet Ingresses")
         for key, name, _glyph in PLANETS:
             action = ingress_menu.addAction(f"Show {name} Ingresses")

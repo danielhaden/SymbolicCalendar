@@ -350,8 +350,11 @@ class DayCell(QPushButton):
         # body key -> local 'HH:MM' for bodies ingressing a new sign this day;
         # marked with an arrow in the band, time faded in on hover.
         self._asc_ingresses: dict[str, str] = {}
-        self._ingress_hits: list[tuple[QRectF, str]] = []   # (glyph rect, time)
-        self._ingress_shown_time: str | None = None   # time drawn through a fade
+        # Band-glyph hover: (glyph rect, lines) where lines is a tuple of
+        # (text, underline) — ingress times (plain) and a void-of-course begin
+        # time (underlined, matching the underlined moon glyph).
+        self._ingress_hits: list[tuple[QRectF, tuple]] = []
+        self._ingress_shown_lines: tuple = ()   # lines drawn through a fade
         self._ingress_hover_rect = QRectF()
         self._ingress_hover_progress = 0.0
         self._ingress_hover_anim = QVariantAnimation(self)
@@ -705,24 +708,24 @@ class DayCell(QPushButton):
         self._bar_hover_progress = float(value)
         self.update()
 
-    # -- ascendant-band ingress hover ------------------------------------
-    def _ingress_at(self, pos) -> tuple[QRectF, str] | None:
-        """The (glyph rect, time) of an ingressing body under ``pos``, or None."""
-        for rect, time in self._ingress_hits:
+    # -- ascendant-band glyph hover (ingress / void-of-course) -----------
+    def _ingress_at(self, pos) -> tuple[QRectF, tuple] | None:
+        """The (glyph rect, lines) of an annotated band glyph under ``pos``."""
+        for rect, lines in self._ingress_hits:
             if rect.contains(pos):
-                return rect, time
+                return rect, lines
         return None
 
-    def _set_ingress_hover(self, hit: tuple[QRectF, str] | None) -> None:
-        """Fade a small ingress-time box in (over the hovered glyph) / out."""
-        time = hit[1] if hit else None
-        if time == self._ingress_shown_time \
-                and (time is None) == (self._ingress_hover_progress == 0.0):
+    def _set_ingress_hover(self, hit: tuple[QRectF, tuple] | None) -> None:
+        """Fade a small time card in (over the hovered glyph) / out."""
+        lines = hit[1] if hit else ()
+        if lines == self._ingress_shown_lines \
+                and (not lines) == (self._ingress_hover_progress == 0.0):
             if hit:
                 self._ingress_hover_rect = hit[0]
             return
         if hit:
-            self._ingress_shown_time = time
+            self._ingress_shown_lines = lines
             self._ingress_hover_rect = hit[0]
             self._ingress_fade_to(1.0)
         else:
@@ -742,32 +745,38 @@ class DayCell(QPushButton):
         self.update()
 
     def _draw_ingress_hover(self, p: QPainter, t: Theme) -> None:
-        """A small time chip fading in above the hovered ingress glyph."""
-        if self._ingress_hover_progress <= 0.0 or not self._ingress_shown_time:
+        """A small card fading in above the hovered band glyph: an ingress time
+        (plain) and/or a void-of-course begin time (underlined)."""
+        lines = self._ingress_shown_lines
+        if self._ingress_hover_progress <= 0.0 or not lines:
             return
         s = self._paint_scale()
         r = self._ingress_hover_rect
-        text = self._ingress_shown_time
         font = QFont(self.font())
         font.setPixelSize(max(1, round(10 * s)))
         p.setFont(font)
         fm = p.fontMetrics()
-        tw = fm.horizontalAdvance(text) + 8.0
-        th = fm.height() + 2.0
+        lh = fm.height()
+        tw = max(fm.horizontalAdvance(text) for text, _u in lines) + 8.0
+        th = lh * len(lines) + 2.0
         x = max(1.0, min(r.center().x() - tw / 2.0, self.width() - tw - 1.0))
         y = r.top() - th - 2.0
         if y < 0:
             y = r.bottom() + 2.0     # no room above: drop it below the glyph
-        chip = QRectF(x, y, tw, th)
         p.save()
         p.setOpacity(self._ingress_hover_progress)
         bg = QColor(t.BG_1)
         bg.setAlpha(240)
         p.setPen(Qt.NoPen)
         p.setBrush(bg)
-        p.drawRoundedRect(chip, 2, 2)
+        p.drawRoundedRect(QRectF(x, y, tw, th), 2, 2)
         p.setPen(QColor(t.TEXT))
-        p.drawText(chip, Qt.AlignCenter, text)
+        ly = y + 1.0
+        for text, underline in lines:
+            font.setUnderline(underline)
+            p.setFont(font)
+            p.drawText(QRectF(x, ly, tw, lh), Qt.AlignCenter, text)
+            ly += lh
         p.restore()
 
     def _draw_bar_hover(self, p: QPainter, t: Theme) -> None:
@@ -913,9 +922,13 @@ class DayCell(QPushButton):
                 for body in bodies:
                     glyph = _BODY_GLYPHS.get(body, "")
                     ingress = self._asc_ingresses.get(body)
+                    # Underline the Moon on a day a void-of-course period begins.
+                    voc = self._void_begin if body == "moon" else None
+                    body_font = QFont(planet_font)
+                    body_font.setUnderline(voc is not None)
+                    p.setFont(body_font)
+                    p.setPen(body_col)
                     if ingress is None:
-                        p.setFont(planet_font)
-                        p.setPen(body_col)
                         p.drawText(QRectF(cx0, y, cw, _ASC_ROW * s),
                                    Qt.AlignCenter, glyph)
                     else:
@@ -923,15 +936,19 @@ class DayCell(QPushButton):
                         gwid = pfm.horizontalAdvance(glyph)
                         awid = afm.horizontalAdvance("→")
                         gx = cxc - (gwid + awid) / 2.0
-                        p.setFont(planet_font)
-                        p.setPen(body_col)
                         p.drawText(QRectF(gx, y, gwid, _ASC_ROW * s),
                                    Qt.AlignLeft | Qt.AlignVCenter, glyph)
                         p.setFont(arrow_font)
                         p.drawText(QRectF(gx + gwid, y, awid, _ASC_ROW * s),
                                    Qt.AlignLeft | Qt.AlignVCenter, "→")
+                    if ingress is not None or voc is not None:
+                        lines = []
+                        if ingress is not None:
+                            lines.append((ingress, False))
+                        if voc is not None:
+                            lines.append((voc, True))   # underlined, like the moon
                         self._ingress_hits.append(
-                            (QRectF(cx0, y, cw, _ASC_ROW * s), ingress))
+                            (QRectF(cx0, y, cw, _ASC_ROW * s), tuple(lines)))
                     y += _ASC_ROW * s
                 p.restore()
 
@@ -1187,15 +1204,9 @@ class DayCell(QPushButton):
 
     # -- astrological mark stack (scrollable when it overflows) -----------
     def _visible_marks(self) -> list[str]:
-        """The ordered right-hand stack: retrograde stations, then (when shown)
-        the Moon's aspects and a void-of-course mark. (Sign ingresses now live
-        in the ascendant band.)"""
-        marks = [f"{glyph}:{arrow}" for glyph, arrow in self._station_marks]
-        if self._show_aspects and self._void_begin:
-            # A void-of-course period is shown by the time it begins (the Moon
-            # makes its last aspect then); its end is the next sign-ingress time.
-            marks.append(self._void_begin)
-        return marks
+        """The ordered right-hand stack: retrograde stations. (Sign ingresses
+        and void-of-course now live in the ascendant band.)"""
+        return [f"{glyph}:{arrow}" for glyph, arrow in self._station_marks]
 
     def _marks_rect(self) -> QRectF:
         """The right-hand strip the mark stack is drawn (and scrolled) within:

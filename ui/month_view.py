@@ -59,6 +59,7 @@ from model import (
     current_location,
     daylight,
     ingresses_on,
+    stations_on,
     moon_aspects,
     moon_ingress_at,
     moon_phase,
@@ -350,6 +351,9 @@ class DayCell(QPushButton):
         # body key -> local 'HH:MM' for bodies ingressing a new sign this day;
         # marked with an arrow in the band, time faded in on hover.
         self._asc_ingresses: dict[str, str] = {}
+        # planet key -> (station type 'retrograde'/'direct', local 'HH:MM');
+        # marked above the glyph in the band, time in the hover card.
+        self._asc_stations: dict[str, tuple[str, str]] = {}
         # Band-glyph hover: (glyph rect, lines) where lines is a tuple of
         # (text, underline) — ingress times (plain) and a void-of-course begin
         # time (underlined, matching the underlined moon glyph).
@@ -443,6 +447,7 @@ class DayCell(QPushButton):
         ascendant: Ascendant | None,
         asc_planets: dict[int, tuple[str, ...]],
         asc_ingresses: dict[str, str],
+        asc_stations: dict[str, tuple[str, str]],
         moon_labels: list[tuple[str | None, str | None]],
         has_journal: bool,
         events: list[Occurrence],
@@ -464,6 +469,7 @@ class DayCell(QPushButton):
         self._ascendant = ascendant
         self._asc_planets = asc_planets
         self._asc_ingresses = asc_ingresses
+        self._asc_stations = asc_stations
         self._moon_labels = moon_labels
         self._moon_hover_anim.stop()
         self._moon_hover_seg = None
@@ -922,6 +928,7 @@ class DayCell(QPushButton):
                 for body in bodies:
                     glyph = _BODY_GLYPHS.get(body, "")
                     ingress = self._asc_ingresses.get(body)
+                    station = self._asc_stations.get(body)   # (kind, 'HH:MM')
                     # Underline the Moon on a day a void-of-course period begins.
                     voc = self._void_begin if body == "moon" else None
                     body_font = QFont(planet_font)
@@ -941,10 +948,20 @@ class DayCell(QPushButton):
                         p.setFont(arrow_font)
                         p.drawText(QRectF(gx + gwid, y, awid, _ASC_ROW * s),
                                    Qt.AlignLeft | Qt.AlignVCenter, "→")
-                    if ingress is not None or voc is not None:
+                    # Station mark just over the glyph: "~" retrograde, "‾" direct.
+                    smark = None
+                    if station is not None:
+                        smark = "~" if station[0] == "retrograde" else "‾"
+                        p.setFont(arrow_font)
+                        p.setPen(body_col)
+                        p.drawText(QRectF(cx0, y - 1.5 * s, cw, _ASC_ARROW_PX * s),
+                                   Qt.AlignHCenter | Qt.AlignTop, smark)
+                    if ingress is not None or station is not None or voc is not None:
                         lines = []
                         if ingress is not None:
                             lines.append((ingress, False))
+                        if station is not None:
+                            lines.append((f"{smark} {station[1]}", False))
                         if voc is not None:
                             lines.append((voc, True))   # underlined, like the moon
                         self._ingress_hits.append(
@@ -1204,9 +1221,10 @@ class DayCell(QPushButton):
 
     # -- astrological mark stack (scrollable when it overflows) -----------
     def _visible_marks(self) -> list[str]:
-        """The ordered right-hand stack: retrograde stations. (Sign ingresses
-        and void-of-course now live in the ascendant band.)"""
-        return [f"{glyph}:{arrow}" for glyph, arrow in self._station_marks]
+        """The right-hand mark stack is now empty — all of its astro elements
+        (ingresses, retrograde/direct stations, void-of-course) live in the
+        ascendant band at the bottom."""
+        return []
 
     def _marks_rect(self) -> QRectF:
         """The right-hand strip the mark stack is drawn (and scrolled) within:
@@ -1487,6 +1505,7 @@ class DayCell(QPushButton):
         self._ascendant = other._ascendant
         self._asc_planets = other._asc_planets
         self._asc_ingresses = other._asc_ingresses
+        self._asc_stations = other._asc_stations
         self._show_ascendant = other._show_ascendant
         self._bars_horizontal = other._bars_horizontal
         self._moon_labels = other._moon_labels
@@ -2677,6 +2696,7 @@ class MonthView(QWidget):
                     ascendant=ascendant(day, location),
                     asc_planets=planets_in_signs(day, location),
                     asc_ingresses=ingresses_on(day, location),
+                    asc_stations=stations_on(day, location),
                     moon_labels=self._moon_span_labels(day),
                     has_journal=self._journal.has(day),
                     events=self._events.get(day),

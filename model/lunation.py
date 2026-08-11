@@ -347,6 +347,40 @@ def ingresses_on(day: date, location: "Location") -> dict[str, str]:
     return out
 
 
+def _speed(jd: float, body: int) -> float:
+    """Tropical longitude speed (deg/day) of ``body`` at ``jd``."""
+    return swe.calc_ut(jd, body, swe.FLG_MOSEPH | swe.FLG_SPEED)[0][3]
+
+
+@lru_cache(maxsize=2048)
+def stations_on(day: date, location: "Location") -> dict[str, tuple[str, str]]:
+    """Map of planet key -> (type, local 'HH:MM') for each planet that stations
+    on ``day``: 'retrograde' (turns backward) or 'direct' (resumes forward).
+    Only the planets station; the Sun and Moon never do."""
+    if not _SWE_AVAILABLE:
+        return {}
+    jd0 = _local_midnight_jd(day, location)
+    jd1 = jd0 + 1.0
+    out: dict[str, tuple[str, str]] = {}
+    for key, body in _ASPECT_BODIES.items():   # Mercury..Pluto
+        v0 = _speed(jd0, body)
+        v1 = _speed(jd1, body)
+        if (v0 >= 0) == (v1 >= 0):              # no sign change: no station
+            continue
+        kind = "retrograde" if v0 > 0 else "direct"
+        lo, hi = jd0, jd1
+        for _ in range(40):                     # bisect the speed zero-crossing
+            mid = (lo + hi) / 2.0
+            if (_speed(mid, body) >= 0) == (v0 >= 0):
+                lo = mid
+            else:
+                hi = mid
+        total = round((hi - jd0) * 24 * 60)
+        h, m = divmod(total, 60)
+        out[key] = (kind, f"{h % 24:02d}:{m % 60:02d}")
+    return out
+
+
 def _unwrap(seq: list[float]) -> list[float]:
     """Unwrap a 0..360 angle series into a continuous (here monotonically
     increasing, as the Moon outruns every planet) sequence."""

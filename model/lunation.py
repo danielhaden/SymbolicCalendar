@@ -302,6 +302,51 @@ def _lon(jd: float, body: int) -> float:
     return swe.calc_ut(jd, body, swe.FLG_MOSEPH)[0][0]
 
 
+# Bodies whose sign ingresses are timed directly from the ephemeris (the Moon
+# is handled separately via moon_ingress_at, which also drives void-of-course).
+_INGRESS_BODIES = {
+    "sun": swe.SUN, "mercury": swe.MERCURY, "venus": swe.VENUS,
+    "mars": swe.MARS, "jupiter": swe.JUPITER, "saturn": swe.SATURN,
+    "uranus": swe.URANUS, "neptune": swe.NEPTUNE, "pluto": swe.PLUTO,
+} if _SWE_AVAILABLE else {}
+
+
+def _local_midnight_jd(day: date, location: "Location") -> float:
+    """Julian day (UT) of local midnight starting ``day``."""
+    dt = datetime(day.year, day.month, day.day, 0, 0, tzinfo=ZoneInfo(location.tz_name))
+    return _jd_utc(dt.astimezone(timezone.utc))
+
+
+@lru_cache(maxsize=2048)
+def ingresses_on(day: date, location: "Location") -> dict[str, str]:
+    """Map of body key -> local 'HH:MM' for each body entering a new sign on
+    ``day`` (local). Covers the Sun, the planets, and the Moon."""
+    if not _SWE_AVAILABLE:
+        return {}
+    out: dict[str, str] = {}
+    moon = moon_ingress_at(day, location)
+    if moon is not None:
+        out["moon"] = moon[1]
+    jd0 = _local_midnight_jd(day, location)
+    jd1 = jd0 + 1.0
+    for key, body in _INGRESS_BODIES.items():
+        s0 = int(_lon(jd0, body) // 30) % 12
+        s1 = int(_lon(jd1, body) // 30) % 12
+        if s0 == s1:
+            continue
+        lo, hi = jd0, jd1
+        for _ in range(40):                 # bisect the sign-boundary crossing
+            mid = (lo + hi) / 2.0
+            if int(_lon(mid, body) // 30) % 12 == s0:
+                lo = mid
+            else:
+                hi = mid
+        total = round((hi - jd0) * 24 * 60)
+        h, m = divmod(total, 60)
+        out[key] = f"{h % 24:02d}:{m % 60:02d}"
+    return out
+
+
 def _unwrap(seq: list[float]) -> list[float]:
     """Unwrap a 0..360 angle series into a continuous (here monotonically
     increasing, as the Moon outruns every planet) sequence."""

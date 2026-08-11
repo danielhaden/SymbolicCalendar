@@ -58,6 +58,7 @@ from model import (
     ascendant,
     current_location,
     daylight,
+    ingresses_on,
     moon_aspects,
     moon_ingress_at,
     moon_phase,
@@ -132,6 +133,7 @@ _ASC_PLANET_PX = 8.5     # stacked planet/luminary glyph size
 _ASC_ROW = 10.0          # vertical pitch per stacked planet
 _ASC_GLYPH_GAP = 2.5     # gap below the sign glyph before the first planet
 _ASC_BOTTOM_PAD = 2.5    # padding below the last planet
+_ASC_ARROW_PX = 7.0      # ingress arrow drawn after an ingressing body's glyph
 _BAR_HATCH_GAP = 4.6      # spacing between hatch lines (larger = sparser)
 _BAR_HATCH_WIDTH = 1.8    # hatch line thickness
 _BAR_BORDER_WIDTH = 0.6   # bar outline thickness
@@ -345,6 +347,17 @@ class DayCell(QPushButton):
         # sign index -> that sign's bodies (stacked in the band); busiest sign
         # sets the band's height for the day.
         self._asc_planets: dict[int, tuple[str, ...]] = {}
+        # body key -> local 'HH:MM' for bodies ingressing a new sign this day;
+        # marked with an arrow in the band, time faded in on hover.
+        self._asc_ingresses: dict[str, str] = {}
+        self._ingress_hits: list[tuple[QRectF, str]] = []   # (glyph rect, time)
+        self._ingress_shown_time: str | None = None   # time drawn through a fade
+        self._ingress_hover_rect = QRectF()
+        self._ingress_hover_progress = 0.0
+        self._ingress_hover_anim = QVariantAnimation(self)
+        self._ingress_hover_anim.setDuration(_MOONBAR_FADE_MS)
+        self._ingress_hover_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._ingress_hover_anim.valueChanged.connect(self._on_ingress_hover_anim)
         self._show_ascendant = True    # View menu toggle
         # Orientation of both time bars: True = horizontal (bottom edge, 24h
         # maps left->right, the default); False = vertical (left edge, top->
@@ -426,6 +439,7 @@ class DayCell(QPushButton):
         moonlight: Moonlight | None,
         ascendant: Ascendant | None,
         asc_planets: dict[int, tuple[str, ...]],
+        asc_ingresses: dict[str, str],
         moon_labels: list[tuple[str | None, str | None]],
         has_journal: bool,
         events: list[Occurrence],
@@ -446,6 +460,7 @@ class DayCell(QPushButton):
         self._moonlight = moonlight
         self._ascendant = ascendant
         self._asc_planets = asc_planets
+        self._asc_ingresses = asc_ingresses
         self._moon_labels = moon_labels
         self._moon_hover_anim.stop()
         self._moon_hover_seg = None
@@ -690,6 +705,71 @@ class DayCell(QPushButton):
         self._bar_hover_progress = float(value)
         self.update()
 
+    # -- ascendant-band ingress hover ------------------------------------
+    def _ingress_at(self, pos) -> tuple[QRectF, str] | None:
+        """The (glyph rect, time) of an ingressing body under ``pos``, or None."""
+        for rect, time in self._ingress_hits:
+            if rect.contains(pos):
+                return rect, time
+        return None
+
+    def _set_ingress_hover(self, hit: tuple[QRectF, str] | None) -> None:
+        """Fade a small ingress-time box in (over the hovered glyph) / out."""
+        time = hit[1] if hit else None
+        if time == self._ingress_shown_time \
+                and (time is None) == (self._ingress_hover_progress == 0.0):
+            if hit:
+                self._ingress_hover_rect = hit[0]
+            return
+        if hit:
+            self._ingress_shown_time = time
+            self._ingress_hover_rect = hit[0]
+            self._ingress_fade_to(1.0)
+        else:
+            self._ingress_fade_to(0.0)
+
+    def _ingress_fade_to(self, end: float) -> None:
+        if self._ingress_hover_progress == end \
+                and self._ingress_hover_anim.state() != QVariantAnimation.Running:
+            return
+        self._ingress_hover_anim.stop()
+        self._ingress_hover_anim.setStartValue(self._ingress_hover_progress)
+        self._ingress_hover_anim.setEndValue(end)
+        self._ingress_hover_anim.start()
+
+    def _on_ingress_hover_anim(self, value: float) -> None:
+        self._ingress_hover_progress = float(value)
+        self.update()
+
+    def _draw_ingress_hover(self, p: QPainter, t: Theme) -> None:
+        """A small time chip fading in above the hovered ingress glyph."""
+        if self._ingress_hover_progress <= 0.0 or not self._ingress_shown_time:
+            return
+        s = self._paint_scale()
+        r = self._ingress_hover_rect
+        text = self._ingress_shown_time
+        font = QFont(self.font())
+        font.setPixelSize(max(1, round(10 * s)))
+        p.setFont(font)
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(text) + 8.0
+        th = fm.height() + 2.0
+        x = max(1.0, min(r.center().x() - tw / 2.0, self.width() - tw - 1.0))
+        y = r.top() - th - 2.0
+        if y < 0:
+            y = r.bottom() + 2.0     # no room above: drop it below the glyph
+        chip = QRectF(x, y, tw, th)
+        p.save()
+        p.setOpacity(self._ingress_hover_progress)
+        bg = QColor(t.BG_1)
+        bg.setAlpha(240)
+        p.setPen(Qt.NoPen)
+        p.setBrush(bg)
+        p.drawRoundedRect(chip, 2, 2)
+        p.setPen(QColor(t.TEXT))
+        p.drawText(chip, Qt.AlignCenter, text)
+        p.restore()
+
     def _draw_bar_hover(self, p: QPainter, t: Theme) -> None:
         """Draw the day's event-time chips right above the bar, stacking upward
         where two times are too close to sit side by side."""
@@ -745,6 +825,7 @@ class DayCell(QPushButton):
         """Draw the rising-sign band along the very bottom edge: each sign's
         glyph straddling the band's top line, with that sign's planets stacked
         beneath it, split across the day's 24h (left = local midnight)."""
+        self._ingress_hits = []
         if self._asc_height() <= 0.0 or self._ascendant is None:
             return
         s = self._paint_scale()
@@ -777,8 +858,11 @@ class DayCell(QPushButton):
         sign_font.setPixelSize(max(1, round(_ASC_SIGN_PX * s)))
         planet_font = QFont(self.font())
         planet_font.setPixelSize(max(1, round(_ASC_PLANET_PX * s)))
+        arrow_font = QFont(self.font())
+        arrow_font.setPixelSize(max(1, round(_ASC_ARROW_PX * s)))
         sfm = QFontMetricsF(sign_font)
         pfm = QFontMetricsF(planet_font)
+        afm = QFontMetricsF(arrow_font)
 
         p.save()
         p.setClipRect(QRectF(0.0, line_y - overhang, w, self.height() - line_y + overhang))
@@ -824,12 +908,30 @@ class DayCell(QPushButton):
             if bodies and cw >= pfm.horizontalAdvance("♀") * 0.55:
                 p.save()
                 p.setClipRect(QRectF(cx0, line_y, cw, body_h))
-                p.setFont(planet_font)
-                p.setPen(body_col)
                 y = line_y + overhang + _ASC_GLYPH_GAP * s
+                cxc = cx0 + cw / 2.0
                 for body in bodies:
-                    p.drawText(QRectF(cx0, y, cw, _ASC_ROW * s), Qt.AlignCenter,
-                               _BODY_GLYPHS.get(body, ""))
+                    glyph = _BODY_GLYPHS.get(body, "")
+                    ingress = self._asc_ingresses.get(body)
+                    if ingress is None:
+                        p.setFont(planet_font)
+                        p.setPen(body_col)
+                        p.drawText(QRectF(cx0, y, cw, _ASC_ROW * s),
+                                   Qt.AlignCenter, glyph)
+                    else:
+                        # Glyph + a small arrow, the pair centred in the row.
+                        gwid = pfm.horizontalAdvance(glyph)
+                        awid = afm.horizontalAdvance("→")
+                        gx = cxc - (gwid + awid) / 2.0
+                        p.setFont(planet_font)
+                        p.setPen(body_col)
+                        p.drawText(QRectF(gx, y, gwid, _ASC_ROW * s),
+                                   Qt.AlignLeft | Qt.AlignVCenter, glyph)
+                        p.setFont(arrow_font)
+                        p.drawText(QRectF(gx + gwid, y, awid, _ASC_ROW * s),
+                                   Qt.AlignLeft | Qt.AlignVCenter, "→")
+                        self._ingress_hits.append(
+                            (QRectF(cx0, y, cw, _ASC_ROW * s), ingress))
                     y += _ASC_ROW * s
                 p.restore()
 
@@ -1085,10 +1187,10 @@ class DayCell(QPushButton):
 
     # -- astrological mark stack (scrollable when it overflows) -----------
     def _visible_marks(self) -> list[str]:
-        """The ordered right-hand stack: planet ingresses, retrograde stations,
-        then (when shown) the Moon's aspects and a void-of-course mark."""
-        marks = list(self._ingress_marks)
-        marks += [f"{glyph}:{arrow}" for glyph, arrow in self._station_marks]
+        """The ordered right-hand stack: retrograde stations, then (when shown)
+        the Moon's aspects and a void-of-course mark. (Sign ingresses now live
+        in the ascendant band.)"""
+        marks = [f"{glyph}:{arrow}" for glyph, arrow in self._station_marks]
         if self._show_aspects and self._void_begin:
             # A void-of-course period is shown by the time it begins (the Moon
             # makes its last aspect then); its end is the next sign-ingress time.
@@ -1177,6 +1279,7 @@ class DayCell(QPushButton):
         self._set_moon_hover(None)
         self._set_bar_hover(False)
         self._set_star_hover(False)
+        self._set_ingress_hover(None)
         if self._daylight_hover:
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
@@ -1215,6 +1318,7 @@ class DayCell(QPushButton):
         self._set_canvas_over(self._canvas_rect().contains(pos))
         self._set_star_hover(
             self._has_journal and self._star_hit_rect().contains(pos))
+        self._set_ingress_hover(self._ingress_at(pos))
         # A vertical-resize cursor over an event box's lower edge.
         self.setCursor(Qt.SizeVerCursor if self._event_resize_at(pos) is not None
                        else Qt.PointingHandCursor)
@@ -1371,6 +1475,7 @@ class DayCell(QPushButton):
         self._show_moon_bar = other._show_moon_bar
         self._ascendant = other._ascendant
         self._asc_planets = other._asc_planets
+        self._asc_ingresses = other._asc_ingresses
         self._show_ascendant = other._show_ascendant
         self._bars_horizontal = other._bars_horizontal
         self._moon_labels = other._moon_labels
@@ -1592,31 +1697,14 @@ class DayCell(QPushButton):
                                    box.top() + pad - tr.y()), e.key)
             p.restore()
 
-        # --- Top-right glyph: the zodiac sign on a day the Moon enters a new
-        # sign, otherwise the moon-phase shape (crescent/quarter/gibbous/full).
+        # --- Top-right glyph: the moon-phase shape (crescent/quarter/gibbous/
+        # full). Moon sign-ingresses now live in the ascendant band. ---
         full_alpha = 110 if not self._in_month else 255
         base = QColor(t.MOON)
         base.setAlpha(full_alpha)
         cx, cy, r = w - 11.0 * s, 17.0 * s, _MOON_RADIUS * s
 
-        if not self._standalone and self._ingress_sign is not None:
-            glyph = _SIGN_GLYPHS.get(self._ingress_sign)
-            if glyph:
-                font = QFont(self.font())
-                font.setPixelSize(max(1, round(15 * s)))
-                p.setFont(font)
-                p.setPen(base)
-                p.drawText(QRectF(cx - 9 * s, cy - 9 * s, 18 * s, 18 * s),
-                           Qt.AlignCenter, glyph)
-                # Local time the Moon enters the sign, to the glyph's left (this
-                # is also when a void-of-course period ends).
-                if self._ingress_time:
-                    tfont = QFont(self.font())
-                    tfont.setPixelSize(max(1, round(10 * s)))
-                    p.setFont(tfont)
-                    p.drawText(QRectF(0, cy - 9 * s, cx - 11 * s, 18 * s),
-                               Qt.AlignRight | Qt.AlignVCenter, self._ingress_time)
-        elif not self._standalone and self._show_moon_glyph \
+        if not self._standalone and self._show_moon_glyph \
                 and self._lunation is not None:
             # Faint full-disc outline marks the unlit limb (visible at new moon).
             outline = QColor(t.MOON)
@@ -1732,6 +1820,10 @@ class DayCell(QPushButton):
         if not self._standalone and self._bars_horizontal \
                 and self._bar_hover_progress > 0:
             self._draw_bar_hover(p, t)
+
+        # --- Ingress hover: the ingress time above the hovered band glyph. ---
+        if not self._standalone and self._ingress_hover_progress > 0:
+            self._draw_ingress_hover(p, t)
 
         p.end()
 
@@ -2573,6 +2665,7 @@ class MonthView(QWidget):
                     moonlight=moonlight(day),
                     ascendant=ascendant(day, location),
                     asc_planets=planets_in_signs(day, location),
+                    asc_ingresses=ingresses_on(day, location),
                     moon_labels=self._moon_span_labels(day),
                     has_journal=self._journal.has(day),
                     events=self._events.get(day),

@@ -963,23 +963,38 @@ class DayCell(QPushButton):
                 return i
         return None
 
+    def _box_overlaps(self, index: int, rect: QRectF) -> bool:
+        """Whether ``rect`` overlaps another (non-empty) event box on this tile."""
+        for j in range(len(self._events)):
+            if j == index or not self._events[j].key:
+                continue
+            if self._event_box_rect(j).intersects(rect):
+                return True
+        return False
+
     def _resize_event_to(self, pos) -> None:
         """Set the resized event's font size from the vertical drag (up=bigger),
-        clamped to the min/max, and repaint live."""
+        clamped to the min/max — but never grow it into another box."""
         i = self._resize_index
         if i is None or not 0 <= i < len(self._events):
             return
         delta = (self._resize_start_y - pos.y()) * _EVENT_RESIZE_SENS
         size = max(_EVENT_MIN_PX,
                    min(_EVENT_MAX_PX, self._resize_start_size + delta))
-        if size != self._events[i].size:
-            self._events[i].size = size
-            self._resize_changed = True
-            self.update()
+        current = self._events[i].size
+        if size == current:
+            return
+        self._events[i].size = size
+        if size > current and self._box_overlaps(i, self._event_box_rect(i)):
+            self._events[i].size = current   # growth would overlap: hold
+            return
+        self._resize_changed = True
+        self.update()
 
     def _drag_event_to(self, pos) -> None:
         """Move the dragged event box so its centre tracks ``pos`` (minus the
-        grab offset), clamped to keep the box within the canvas."""
+        grab offset), clamped to the canvas and kept from overlapping other
+        boxes — sliding along an edge when the direct move is blocked."""
         i = self._drag_index
         if i is None or not 0 <= i < len(self._events):
             return
@@ -988,15 +1003,22 @@ class DayCell(QPushButton):
             return
         box = self._event_box_rect(i)
         bw, bh = box.width(), box.height()
-        cx = min(max(pos.x() - self._drag_offset.x(),
+        ccx, ccy = box.center().x(), box.center().y()
+        dx = min(max(pos.x() - self._drag_offset.x(),
                      canvas.left() + bw / 2), canvas.right() - bw / 2)
-        cy = min(max(pos.y() - self._drag_offset.y(),
+        dy = min(max(pos.y() - self._drag_offset.y(),
                      canvas.top() + bh / 2), canvas.bottom() - bh / 2)
         e = self._events[i]
-        e.x = (cx - canvas.left()) / canvas.width()
-        e.y = (cy - canvas.top()) / canvas.height()
-        self._drag_moved = True
-        self.update()
+        # Try the full move, then slide on one axis if the direct move overlaps.
+        for nx, ny in ((dx, dy), (dx, ccy), (ccx, dy)):
+            cand = QRectF(nx - bw / 2, ny - bh / 2, bw, bh)
+            if not self._box_overlaps(i, cand):
+                e.x = (nx - canvas.left()) / canvas.width()
+                e.y = (ny - canvas.top()) / canvas.height()
+                self._drag_moved = True
+                self.update()
+                return
+        # Every candidate is blocked: leave the box where it is.
 
     def _set_canvas_over(self, over: bool) -> None:
         """Track whether the cursor is over the canvas, with a delayed fade-in

@@ -338,6 +338,9 @@ class DayCell(QPushButton):
         # maps left->right, the default); False = vertical (left edge, top->
         # bottom). A persisted Settings preference drives it.
         self._bars_horizontal = True
+        # Thickness of the shared bar strip (daylight + moon), in unscaled px.
+        # A persisted Settings preference drives it; defaults to _BAR_W.
+        self._bar_thickness = _BAR_W
         # Per moon-up span, the ('rise', 'set') clock labels (only times that
         # occur on this day); faded in when the span is hovered.
         self._moon_labels: list[tuple[str | None, str | None]] = []
@@ -456,7 +459,9 @@ class DayCell(QPushButton):
         tile carries no astro elements, so it reserves nothing."""
         if self._standalone:
             return 0.0
-        return _BAR_W if (self._show_daylight or self._show_moon_bar) else 0.0
+        if not (self._show_daylight or self._show_moon_bar):
+            return 0.0
+        return self._bar_thickness
 
     def _bars_width(self) -> float:
         """Unscaled width the left-edge bars reserve (0 when horizontal)."""
@@ -502,7 +507,7 @@ class DayCell(QPushButton):
         dawn..dusk mapped onto the tile's 24h time axis."""
         if self._standalone or not self._show_daylight or self._daylight is None:
             return None
-        thick = _BAR_W * self._paint_scale()
+        thick = self._bar_thickness * self._paint_scale()
         d0 = self._daylight.dawn_fraction
         d1 = self._daylight.dusk_fraction
         if self._bars_horizontal:
@@ -545,7 +550,7 @@ class DayCell(QPushButton):
         bar's strip (two rects when a span crosses midnight)."""
         if self._standalone or not self._show_moon_bar or self._moonlight is None:
             return []
-        thick = _BAR_W * self._paint_scale()
+        thick = self._bar_thickness * self._paint_scale()
         if self._bars_horizontal:
             y = self._time_axis_bottom() - thick
             return [QRectF(lo, y, hi - lo, thick)
@@ -632,7 +637,7 @@ class DayCell(QPushButton):
         """The bar strip, used to detect hover in horizontal mode."""
         if not (self._show_daylight or self._show_moon_bar):
             return QRectF()
-        thick = _BAR_W * self._paint_scale()
+        thick = self._bar_thickness * self._paint_scale()
         return QRectF(0.0, self._time_axis_bottom() - thick, self.width(), thick)
 
     def _bar_events(self) -> list[tuple[float, str]]:
@@ -750,7 +755,7 @@ class DayCell(QPushButton):
             return
         s = self._paint_scale()
         w = self.width()
-        bar_top = self._time_axis_bottom() - _BAR_W * s
+        bar_top = self._time_axis_bottom() - self._bar_thickness * s
         font = QFont(self.font())
         font.setPixelSize(max(1, round(10 * s)))
         p.setFont(font)
@@ -1171,6 +1176,11 @@ class DayCell(QPushButton):
             self._set_moon_hover(None)
             self.update()
 
+    def set_bar_thickness(self, px: float) -> None:
+        if px != self._bar_thickness:
+            self._bar_thickness = px
+            self.update()
+
     def wheelEvent(self, event) -> None:
         # No zoom/scroll over the event canvas — swallow the wheel there.
         if self._date is not None and not self._standalone \
@@ -1415,6 +1425,7 @@ class DayCell(QPushButton):
         self._asc_stations = other._asc_stations
         self._show_ascendant = other._show_ascendant
         self._bars_horizontal = other._bars_horizontal
+        self._bar_thickness = other._bar_thickness
         self._moon_labels = other._moon_labels
         self._moon_hover_anim.stop()
         self._moon_hover_seg = None
@@ -2371,6 +2382,13 @@ class MonthView(QWidget):
         for c in self._cells:
             c.set_bars_horizontal(horizontal)
         self._expanded.set_bars_horizontal(horizontal)
+
+    def set_bar_thickness(self, px: float) -> None:
+        """Set the shared daylight/moon bar strip thickness (unscaled px) across
+        the whole month; a persisted Settings preference."""
+        for c in self._cells:
+            c.set_bar_thickness(px)
+        self._expanded.set_bar_thickness(px)
 
     def reload(self) -> None:
         """Re-render the month (e.g. after the location changes)."""

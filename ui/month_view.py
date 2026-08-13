@@ -154,9 +154,6 @@ _CANVAS_PAD = 3.0       # padding so the box doesn't touch other elements
 # Expanded-tile event list: a text column with the note alongside it.
 _EVENT_ROW_H = 24.0     # height of one event row
 _EVENT_TEXT_SIZE = 14.0  # event-text size in the expanded list
-# Canvas-border hover timing.
-_CANVAS_HOVER_DELAY_MS = 150
-_CANVAS_FADE_MS = 180
 # Free-text event boxes placed on the grid-tile canvas.
 _EVENT_MAX_CHARS = 20    # hard cap on an event's label length
 _EVENT_TEXT_PX = 9.5     # default unscaled pixel size of the label text
@@ -333,11 +330,24 @@ class DayCell(QPushButton):
         self._ingress_hover_anim.setDuration(_MOONBAR_FADE_MS)
         self._ingress_hover_anim.setEasingCurve(QEasingCurve.InOutQuad)
         self._ingress_hover_anim.valueChanged.connect(self._on_ingress_hover_anim)
+        # The band rests collapsed (sign glyphs only); hovering its strip grows
+        # it upward from the bottom, overlaying the tile to reveal the stacked
+        # planets/ingresses/stations. Only the collapsed height is reserved in
+        # layout, so the reveal never reflows the tile.
+        self._asc_expanded = False           # hover target state
+        self._asc_expand_progress = 0.0      # 0 collapsed .. 1 fully open
+        self._asc_expand_anim = QVariantAnimation(self)
+        self._asc_expand_anim.setDuration(_MOONBAR_FADE_MS)
+        self._asc_expand_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._asc_expand_anim.valueChanged.connect(self._on_asc_expand_anim)
         self._show_ascendant = True    # View menu toggle
         # Orientation of both time bars: True = horizontal (bottom edge, 24h
         # maps left->right, the default); False = vertical (left edge, top->
         # bottom). A persisted Settings preference drives it.
         self._bars_horizontal = True
+        # Thickness of the shared bar strip (daylight + moon), in unscaled px.
+        # A persisted Settings preference drives it; defaults to _BAR_W.
+        self._bar_thickness = _BAR_W
         # Per moon-up span, the ('rise', 'set') clock labels (only times that
         # occur on this day); faded in when the span is hovered.
         self._moon_labels: list[tuple[str | None, str | None]] = []
@@ -356,18 +366,6 @@ class DayCell(QPushButton):
         self._bar_hover_anim.setDuration(_MOONBAR_FADE_MS)
         self._bar_hover_anim.setEasingCurve(QEasingCurve.InOutQuad)
         self._bar_hover_anim.valueChanged.connect(self._on_bar_hover_anim)
-        # Event canvas: a borderless box in the tile body holding event
-        # glyphs; its border fades in (after a delay) while hovered.
-        self._canvas_over = False        # mouse currently over the canvas
-        self._canvas_progress = 0.0      # border fade amount (0..1)
-        self._canvas_timer = QTimer(self)
-        self._canvas_timer.setSingleShot(True)
-        self._canvas_timer.setInterval(_CANVAS_HOVER_DELAY_MS)
-        self._canvas_timer.timeout.connect(self._on_canvas_timer)
-        self._canvas_anim = QVariantAnimation(self)
-        self._canvas_anim.setDuration(_CANVAS_FADE_MS)
-        self._canvas_anim.setEasingCurve(QEasingCurve.InOutQuad)
-        self._canvas_anim.valueChanged.connect(self._on_canvas_anim)
         # Journal star (grid tiles): a small 5-point star by the date number,
         # shown when the day has an entry; grey, fading to black while hovered.
         self._star_hover = False
@@ -435,6 +433,9 @@ class DayCell(QPushButton):
         self._bar_hover_anim.stop()
         self._bar_hover = False
         self._bar_hover_progress = 0.0
+        self._asc_expand_anim.stop()
+        self._asc_expanded = False
+        self._asc_expand_progress = 0.0
         self._has_journal = has_journal
         self._events = events
         self.update()
@@ -456,7 +457,9 @@ class DayCell(QPushButton):
         tile carries no astro elements, so it reserves nothing."""
         if self._standalone:
             return 0.0
-        return _BAR_W if (self._show_daylight or self._show_moon_bar) else 0.0
+        if not (self._show_daylight or self._show_moon_bar):
+            return 0.0
+        return self._bar_thickness
 
     def _bars_width(self) -> float:
         """Unscaled width the left-edge bars reserve (0 when horizontal)."""
@@ -472,9 +475,14 @@ class DayCell(QPushButton):
             return 0
         return max((len(v) for v in self._asc_planets.values()), default=0)
 
-    def _asc_band_body(self) -> float:
-        """Scaled height of the filled band below its top line: the sign glyph's
-        lower half, plus a stacked row for each planet in the busiest sign."""
+    def _asc_collapsed_body(self) -> float:
+        """Scaled height of the resting band below its top line: just the sign
+        glyph's lower half (no stacked planets)."""
+        return (_ASC_SIGN_PX * 0.5 + _ASC_BOTTOM_PAD) * self._paint_scale()
+
+    def _asc_expanded_body(self) -> float:
+        """Scaled height of the fully-open band below its top line: the sign
+        glyph's lower half plus a stacked row per planet in the busiest sign."""
         s = self._paint_scale()
         body = _ASC_SIGN_PX * 0.5 + _ASC_BOTTOM_PAD
         n = self._asc_planet_max()
@@ -482,14 +490,45 @@ class DayCell(QPushButton):
             body += _ASC_GLYPH_GAP + n * _ASC_ROW
         return body * s
 
+    def _asc_current_body(self) -> float:
+        """The band body height at the current expand progress (animated)."""
+        c = self._asc_collapsed_body()
+        return c + (self._asc_expanded_body() - c) * self._asc_expand_progress
+
     def _asc_height(self) -> float:
-        """Scaled height reserved at the very bottom for the ascendant band —
-        the filled body plus the sign glyph's upper half straddling the top
-        line. 0 when hidden, on the expanded tile, or there's no data."""
+        """Scaled height reserved at the very bottom for the ascendant band: the
+        *collapsed* body plus the sign glyph's upper half straddling the top
+        line. The expansion overlays the tile, so only this is reserved. 0 when
+        hidden, on the expanded tile, or there's no data."""
         if self._standalone or not (self._show_ascendant
                                     and self._ascendant is not None):
             return 0.0
-        return self._asc_band_body() + _ASC_SIGN_PX * 0.5 * self._paint_scale()
+        return self._asc_collapsed_body() + _ASC_SIGN_PX * 0.5 * self._paint_scale()
+
+    def _asc_can_expand(self) -> bool:
+        """True when the band has stacked planets worth revealing on hover."""
+        return self._asc_height() > 0.0 and self._asc_planet_max() > 0
+
+    def _asc_hit_rect(self, *, expanded: bool) -> QRectF:
+        """Full-width band strip used for hover: the collapsed trigger area, or
+        the open band once expanded (so the cursor can roam the revealed rows)."""
+        body = self._asc_expanded_body() if expanded else self._asc_collapsed_body()
+        total = body + _ASC_SIGN_PX * 0.5 * self._paint_scale()
+        return QRectF(0.0, self.height() - total, self.width(), total)
+
+    def _set_asc_expanded(self, flag: bool) -> None:
+        """Animate the band open (True) or closed (False)."""
+        if flag == self._asc_expanded:
+            return
+        self._asc_expanded = flag
+        self._asc_expand_anim.stop()
+        self._asc_expand_anim.setStartValue(self._asc_expand_progress)
+        self._asc_expand_anim.setEndValue(1.0 if flag else 0.0)
+        self._asc_expand_anim.start()
+
+    def _on_asc_expand_anim(self, value: float) -> None:
+        self._asc_expand_progress = float(value)
+        self.update()
 
     def _time_axis_bottom(self) -> float:
         """Y of the 24h time axis's bottom — above the ascendant band, so the
@@ -502,7 +541,7 @@ class DayCell(QPushButton):
         dawn..dusk mapped onto the tile's 24h time axis."""
         if self._standalone or not self._show_daylight or self._daylight is None:
             return None
-        thick = _BAR_W * self._paint_scale()
+        thick = self._bar_thickness * self._paint_scale()
         d0 = self._daylight.dawn_fraction
         d1 = self._daylight.dusk_fraction
         if self._bars_horizontal:
@@ -545,7 +584,7 @@ class DayCell(QPushButton):
         bar's strip (two rects when a span crosses midnight)."""
         if self._standalone or not self._show_moon_bar or self._moonlight is None:
             return []
-        thick = _BAR_W * self._paint_scale()
+        thick = self._bar_thickness * self._paint_scale()
         if self._bars_horizontal:
             y = self._time_axis_bottom() - thick
             return [QRectF(lo, y, hi - lo, thick)
@@ -632,7 +671,7 @@ class DayCell(QPushButton):
         """The bar strip, used to detect hover in horizontal mode."""
         if not (self._show_daylight or self._show_moon_bar):
             return QRectF()
-        thick = _BAR_W * self._paint_scale()
+        thick = self._bar_thickness * self._paint_scale()
         return QRectF(0.0, self._time_axis_bottom() - thick, self.width(), thick)
 
     def _bar_events(self) -> list[tuple[float, str]]:
@@ -750,7 +789,7 @@ class DayCell(QPushButton):
             return
         s = self._paint_scale()
         w = self.width()
-        bar_top = self._time_axis_bottom() - _BAR_W * s
+        bar_top = self._time_axis_bottom() - self._bar_thickness * s
         font = QFont(self.font())
         font.setPixelSize(max(1, round(10 * s)))
         p.setFont(font)
@@ -802,7 +841,8 @@ class DayCell(QPushButton):
             return
         s = self._paint_scale()
         w = self.width()
-        body_h = self._asc_band_body()
+        prog = self._asc_expand_progress
+        body_h = self._asc_current_body()        # collapsed..expanded (animated)
         line_y = self.height() - body_h          # top line; the sign glyph sits on it
         overhang = _ASC_SIGN_PX * 0.5 * s        # the glyph's half above the line
         dim = not self._in_month
@@ -838,6 +878,12 @@ class DayCell(QPushButton):
 
         p.save()
         p.setClipRect(QRectF(0.0, line_y - overhang, w, self.height() - line_y + overhang))
+
+        # 0) While expanded, an opaque backing so the band occludes the tile
+        #    content (event boxes, the daylight/moon strip) it grows over. At
+        #    rest (prog == 0) the resting strip keeps its translucent look.
+        if prog > 0.0:
+            p.fillRect(QRectF(0.0, line_y, w, body_h), QColor(t.BG_1))
 
         # 1) Alternating fills so adjacent blocks read apart in greyscale.
         p.setPen(Qt.NoPen)
@@ -877,9 +923,10 @@ class DayCell(QPushButton):
                 mid = cx0 + cw / 2.0
                 gaps.append((mid - gw / 2.0 - 1.0, mid + gw / 2.0 + 1.0))
             bodies = self._asc_planets.get(sign, ())
-            if bodies and cw >= pfm.horizontalAdvance("♀") * 0.55:
+            if bodies and prog > 0.0 and cw >= pfm.horizontalAdvance("♀") * 0.55:
                 p.save()
                 p.setClipRect(QRectF(cx0, line_y, cw, body_h))
+                p.setOpacity(prog)   # planets fade in as the band opens
                 y = line_y + overhang + _ASC_GLYPH_GAP * s
                 cxc = cx0 + cw / 2.0
                 for body in bodies:
@@ -939,12 +986,13 @@ class DayCell(QPushButton):
         p.restore()
 
     def _canvas_rect(self) -> QRectF:
-        """The event-canvas box in the tile body (right of the daylight bar,
-        below the number/moon header).
+        """The event-canvas box in the tile body (right of the daylight bar).
 
-        On the expanded tile the canvas occupies the left half of the body and
-        runs the full height below the day number (the right half is reserved
-        for the event-detail editor)."""
+        On grid tiles the canvas runs nearly the full tile height; the date
+        number in the top-left is carved out separately (see ``_number_rect``)
+        so event boxes can't sit on it. On the expanded tile the canvas occupies
+        the left half of the body and runs the full height below the day number
+        (the right half is reserved for the event-detail editor)."""
         s = self._paint_scale()
         left = (self._bars_width() + 5.0) * s
         pad = _CANVAS_PAD * s
@@ -957,7 +1005,7 @@ class DayCell(QPushButton):
             bottom = self.height() - m - bh
             rect = QRectF(left, top, right - left, bottom - top)
             return rect.adjusted(pad, pad, -pad, -pad)
-        top = _CANVAS_TOP * s
+        top = _CANVAS_MARGIN * s   # up to the tile top; the number is excluded
         rect = QRectF(left, top, self.width() - left - m,
                       self.height() - top - m - bh)
         return rect.adjusted(pad, pad, -pad, -pad)
@@ -1021,11 +1069,58 @@ class DayCell(QPushButton):
         font.setPixelSize(max(1, round(size_px * self._paint_scale())))
         return font
 
+    def _number_rect(self) -> QRectF:
+        """Top-left exclusion zone around the date number (and its journal star
+        when present): grid-tile event boxes may not sit on or be dragged onto
+        it. Empty on the expanded tile, whose canvas already clears the number.
+        Measured bold — the widest state — so the zone is stable across
+        hover/today and doesn't shift under a box mid-drag."""
+        if self._standalone or self._date is None:
+            return QRectF()
+        s = self._paint_scale()
+        bars = self._bars_width()
+        left = ((bars + 4) if bars else 9) * s
+        font = QFont(self.font())
+        font.setPixelSize(max(1, round(13 * s)))
+        font.setBold(True)
+        fm = QFontMetricsF(font)
+        top = 9.0 * s
+        right = left + fm.horizontalAdvance(str(self._date.day))
+        bottom = top + fm.height()
+        if self._has_journal:
+            cx, cy, outer = self._star_geom()
+            right = max(right, cx + outer)
+            bottom = max(bottom, cy + outer)
+        pad = _EVENT_BOX_PAD * s + 1.0
+        # Extend to the left tile edge — there's no useful space left of the
+        # number — and pad the other sides so boxes keep a small gap.
+        return QRectF(0.0, top - pad, right + pad, (bottom - top) + 2 * pad)
+
+    def _moon_glyph_rect(self) -> QRectF:
+        """Top-right exclusion zone around the moon-phase glyph, when it's shown
+        (it's off by default). Empty otherwise, or on the expanded tile."""
+        if self._standalone or not self._show_moon_glyph \
+                or self._lunation is None:
+            return QRectF()
+        s = self._paint_scale()
+        cx, cy, r = self.width() - 11.0 * s, 17.0 * s, _MOON_RADIUS * s
+        pad = _EVENT_BOX_PAD * s + 1.0
+        left = cx - r - pad
+        # Extend to the top and right tile edges — no useful space past the glyph.
+        return QRectF(left, 0.0, self.width() - left, cy + r + pad)
+
+    def _exclusion_rects(self) -> list[QRectF]:
+        """Header elements event boxes must avoid: the date number and, when
+        shown, the moon-phase glyph."""
+        return [r for r in (self._number_rect(), self._moon_glyph_rect())
+                if not r.isNull()]
+
     def _event_box_rect(self, index: int) -> QRectF:
         """Grid-tile bounding box for event ``index``: a tight box around the
         key's actual ink (not its font advance/line-height), so even a large
         glyph can sit near the canvas edges. Centred at the stored canvas
-        fraction and clamped so the whole box stays within the canvas."""
+        fraction and clamped so the whole box stays within the canvas — then
+        nudged down out of a header zone (date / moon glyph) if it lands on one."""
         canvas = self._canvas_rect()
         e = self._events[index]
         fm = QFontMetricsF(self._event_font(self._event_size_px(e)))
@@ -1037,7 +1132,24 @@ class DayCell(QPushButton):
         cy = canvas.top() + e.y * canvas.height()
         left = min(max(cx - bw / 2, canvas.left()), canvas.right() - bw)
         top = min(max(cy - bh / 2, canvas.top()), canvas.bottom() - bh)
-        return QRectF(left, top, bw, bh)
+        box = QRectF(left, top, bw, bh)
+        # A box whose stored spot lands on a header zone (legacy data, add-under-
+        # a-glyph, or the raised canvas top) is pushed straight down, clear of
+        # the lowest zone it touches.
+        hit_bottom = max((z.bottom() for z in self._exclusion_rects()
+                          if box.intersects(z)), default=None)
+        if hit_bottom is not None:
+            ny = min(hit_bottom, canvas.bottom() - bh)
+            if ny > box.top():
+                box.moveTop(ny)
+        return box
+
+    def _placement_blocked(self, index: int, rect: QRectF) -> bool:
+        """A candidate box position is blocked if it overlaps another event box
+        or a header exclusion zone (the date number / moon glyph)."""
+        if self._box_overlaps(index, rect):
+            return True
+        return any(rect.intersects(z) for z in self._exclusion_rects())
 
     def _event_box_at(self, pos) -> int | None:
         """Index of the grid-tile event box under ``pos`` (topmost first)."""
@@ -1078,8 +1190,8 @@ class DayCell(QPushButton):
         if size == current:
             return
         self._events[i].size = size
-        if size > current and self._box_overlaps(i, self._event_box_rect(i)):
-            self._events[i].size = current   # growth would overlap: hold
+        if size > current and self._placement_blocked(i, self._event_box_rect(i)):
+            self._events[i].size = current   # growth would collide: hold
             return
         self._resize_changed = True
         self.update()
@@ -1102,45 +1214,17 @@ class DayCell(QPushButton):
         dy = min(max(pos.y() - self._drag_offset.y(),
                      canvas.top() + bh / 2), canvas.bottom() - bh / 2)
         e = self._events[i]
-        # Try the full move, then slide on one axis if the direct move overlaps.
+        # Try the full move, then slide on one axis if the direct move is
+        # blocked (by another box or the date-number zone).
         for nx, ny in ((dx, dy), (dx, ccy), (ccx, dy)):
             cand = QRectF(nx - bw / 2, ny - bh / 2, bw, bh)
-            if not self._box_overlaps(i, cand):
+            if not self._placement_blocked(i, cand):
                 e.x = (nx - canvas.left()) / canvas.width()
                 e.y = (ny - canvas.top()) / canvas.height()
                 self._drag_moved = True
                 self.update()
                 return
         # Every candidate is blocked: leave the box where it is.
-
-    def _set_canvas_over(self, over: bool) -> None:
-        """Track whether the cursor is over the canvas, with a delayed fade-in
-        and a fade-out."""
-        if over == self._canvas_over:
-            return
-        self._canvas_over = over
-        if over:
-            self._canvas_timer.start()  # wait before fading the border in
-        else:
-            self._canvas_timer.stop()
-            self._canvas_fade_to(0.0)
-
-    def _on_canvas_timer(self) -> None:
-        if self._canvas_over:
-            self._canvas_fade_to(1.0)
-
-    def _canvas_fade_to(self, end: float) -> None:
-        if self._canvas_progress == end \
-                and self._canvas_anim.state() != QVariantAnimation.Running:
-            return
-        self._canvas_anim.stop()
-        self._canvas_anim.setStartValue(self._canvas_progress)
-        self._canvas_anim.setEndValue(end)
-        self._canvas_anim.start()
-
-    def _on_canvas_anim(self, value: float) -> None:
-        self._canvas_progress = float(value)
-        self.update()
 
     def set_daylight_visible(self, visible: bool) -> None:
         if visible != self._show_daylight:
@@ -1169,6 +1253,11 @@ class DayCell(QPushButton):
             self._bar_hover = False
             self._bar_hover_progress = 0.0
             self._set_moon_hover(None)
+            self.update()
+
+    def set_bar_thickness(self, px: float) -> None:
+        if px != self._bar_thickness:
+            self._bar_thickness = px
             self.update()
 
     def wheelEvent(self, event) -> None:
@@ -1218,11 +1307,11 @@ class DayCell(QPushButton):
             return
         self._hover = False
         self.setCursor(Qt.PointingHandCursor)   # clear any resize cursor
-        self._set_canvas_over(False)
         self._set_moon_hover(None)
         self._set_bar_hover(False)
         self._set_star_hover(False)
         self._set_ingress_hover(None)
+        self._set_asc_expanded(False)
         if self._daylight_hover:
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
@@ -1247,7 +1336,28 @@ class DayCell(QPushButton):
         if self._drag_index is not None and (event.buttons() & Qt.LeftButton):
             self._drag_event_to(pos)
             return
-        if self._bars_horizontal:
+        # Ascendant band: hovering its strip grows it open. Hysteresis — open
+        # when over the collapsed strip, stay open while over the expanded band.
+        if self._asc_can_expand():
+            if self._asc_expanded:
+                if not self._asc_hit_rect(expanded=True).contains(pos):
+                    self._set_asc_expanded(False)
+            elif self._asc_hit_rect(expanded=False).contains(pos):
+                self._set_asc_expanded(True)
+        else:
+            self._set_asc_expanded(False)
+        asc_open = self._asc_expanded
+
+        if asc_open:
+            # The open band overlays the bar strip; mute their hovers so the
+            # reveal isn't cluttered with bar-time chips behind it.
+            self._set_bar_hover(False)
+            self._set_moon_hover(None)
+            if self._daylight_hover:
+                self._daylight_hover = False
+                self.update()
+                self.daylight_hover_changed.emit()
+        elif self._bars_horizontal:
             # One per-cell hover: the whole bar strip reveals the day's times.
             self._set_bar_hover(self._bar_hover_region().contains(pos))
         else:
@@ -1258,13 +1368,15 @@ class DayCell(QPushButton):
                 self.update()
                 self.daylight_hover_changed.emit()
             self._set_moon_hover(self._moon_segment_at(pos))
-        self._set_canvas_over(self._canvas_rect().contains(pos))
         self._set_star_hover(
             self._has_journal and self._star_hit_rect().contains(pos))
         self._set_ingress_hover(self._ingress_at(pos))
-        # A vertical-resize cursor over an event box's lower edge.
-        self.setCursor(Qt.SizeVerCursor if self._event_resize_at(pos) is not None
-                       else Qt.PointingHandCursor)
+        # A vertical-resize cursor over an event box's lower edge (not while the
+        # band is open over the canvas).
+        if not asc_open and self._event_resize_at(pos) is not None:
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            self.setCursor(Qt.PointingHandCursor)
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event) -> None:
@@ -1415,6 +1527,7 @@ class DayCell(QPushButton):
         self._asc_stations = other._asc_stations
         self._show_ascendant = other._show_ascendant
         self._bars_horizontal = other._bars_horizontal
+        self._bar_thickness = other._bar_thickness
         self._moon_labels = other._moon_labels
         self._moon_hover_anim.stop()
         self._moon_hover_seg = None
@@ -1576,23 +1689,10 @@ class DayCell(QPushButton):
                              _BAR_HATCH_WIDTH, forward=True)
             self._draw_bar_border(p, moon_rect)
 
-        # --- Ascendant band: rising zodiac sign across the day, along the very
-        # bottom edge (beneath the daylight/moon strip). ---
-        self._draw_ascendant(p, t)
-
         # --- Event canvas: a box in the tile body holding one glyph per event.
-        # Grid tiles are borderless until hovered; the expanded tile shows the
-        # day's events in a fixed left-half region. ---
+        # Grid tiles are borderless; the expanded tile shows the day's events in
+        # a fixed left-half region. ---
         canvas = self._canvas_rect()
-        if not self._standalone and self._canvas_progress > 0:
-            p.save()
-            p.setOpacity(self._canvas_progress)
-            cpen = QPen(QColor(t.TEXT_FAINT))
-            cpen.setWidthF(1.0)
-            p.setPen(cpen)
-            p.setBrush(Qt.NoBrush)
-            p.drawRect(canvas)
-            p.restore()
         if self._events and self._standalone:
             # Expanded tile: a vertical list of events as "key : value" — the
             # key at the left, its value alongside. (Only keys show in the grid.)
@@ -1633,6 +1733,11 @@ class DayCell(QPushButton):
                 p.drawText(QPointF(box.left() + pad - tr.x(),
                                    box.top() + pad - tr.y()), e.key)
             p.restore()
+
+        # --- Ascendant band: rising zodiac sign across the day, along the very
+        # bottom edge (beneath the daylight/moon strip). Drawn after the event
+        # boxes so its hover-expansion overlays them cleanly. ---
+        self._draw_ascendant(p, t)
 
         # --- Top-right glyph: the moon-phase shape (crescent/quarter/gibbous/
         # full). Moon sign-ingresses now live in the ascendant band. ---
@@ -2371,6 +2476,13 @@ class MonthView(QWidget):
         for c in self._cells:
             c.set_bars_horizontal(horizontal)
         self._expanded.set_bars_horizontal(horizontal)
+
+    def set_bar_thickness(self, px: float) -> None:
+        """Set the shared daylight/moon bar strip thickness (unscaled px) across
+        the whole month; a persisted Settings preference."""
+        for c in self._cells:
+            c.set_bar_thickness(px)
+        self._expanded.set_bar_thickness(px)
 
     def reload(self) -> None:
         """Re-render the month (e.g. after the location changes)."""

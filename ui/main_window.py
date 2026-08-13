@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QActionGroup, QDesktopServices
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -39,7 +39,12 @@ from model import (
 from model.updates import Release, check_for_update
 from .theme import ThemeManager
 from .month_view import MonthView, PLANETS
-from .settings_dialog import LocationDialog
+from .settings_dialog import (
+    BAR_THICKNESS_MAX,
+    BAR_THICKNESS_MIN,
+    LocationDialog,
+    TimeBarsDialog,
+)
 
 
 class _Panel(QFrame):
@@ -188,6 +193,13 @@ class MainWindow(QMainWindow):
         self._bars_horizontal = self._settings.value(
             "view/bars_horizontal", True, type=bool)
         self._month_view.set_bars_horizontal(self._bars_horizontal)
+        # Shared daylight/moon bar strip thickness (persisted; px), clamped to
+        # the slider's range in case an out-of-range value was ever stored.
+        self._bar_thickness = self._settings.value(
+            "view/bar_thickness", 10, type=int)
+        self._bar_thickness = max(
+            BAR_THICKNESS_MIN, min(BAR_THICKNESS_MAX, self._bar_thickness))
+        self._month_view.set_bar_thickness(self._bar_thickness)
         # The top-right moon-phase glyph is a persisted preference, hidden by
         # default (the daylight/moon bars already convey the phase).
         self._show_moon_phase = self._settings.value(
@@ -242,6 +254,12 @@ class MainWindow(QMainWindow):
         bars_action.setChecked(self._bars_horizontal)
         bars_action.toggled.connect(self._on_toggle_bars_horizontal)
 
+        time_bars_action = settings_menu.addAction("Configure time bars…")
+        # macOS: Qt's text heuristic would see "Configure" and relocate this into
+        # the application menu as a Preferences item. Pin it so it stays here.
+        time_bars_action.setMenuRole(QAction.MenuRole.NoRole)
+        time_bars_action.triggered.connect(self._on_configure_time_bars)
+
         daylight_menu = settings_menu.addMenu("Daylight bar shows")
         daylight_group = QActionGroup(self)
         daylight_group.setExclusive(True)
@@ -267,6 +285,19 @@ class MainWindow(QMainWindow):
         self._bars_horizontal = horizontal
         self._settings.setValue("view/bars_horizontal", horizontal)
         self._month_view.set_bars_horizontal(horizontal)
+
+    def _on_configure_time_bars(self) -> None:
+        original = self._bar_thickness
+        dialog = TimeBarsDialog(
+            original, self._theme.current,
+            on_preview=self._month_view.set_bar_thickness, parent=self)
+        if dialog.exec():
+            self._bar_thickness = dialog.value()
+            self._settings.setValue("view/bar_thickness", self._bar_thickness)
+            self._month_view.set_bar_thickness(self._bar_thickness)
+        else:
+            # Revert the live preview to the value in effect before opening.
+            self._month_view.set_bar_thickness(original)
 
     def _on_toggle_moon_phase(self, visible: bool) -> None:
         self._show_moon_phase = visible

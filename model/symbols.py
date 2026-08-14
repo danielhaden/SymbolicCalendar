@@ -197,11 +197,119 @@ def _cursive_symbols() -> list[Symbol]:
     return out
 
 
+def _fraktur_symbols() -> list[Symbol]:
+    """The Mathematical Fraktur (blackletter) alphabet, a companion to the
+    cursive set. Most letters come from the Mathematical Alphanumeric block; the
+    capitals reserved there (they live in Letterlike Symbols) are substituted.
+    Search each by its plain letter, the whole set with ``#fraktur``."""
+    up_base, lo_base = 0x1D504, 0x1D51E
+    up_hole = {"C": 0x212D, "H": 0x210C, "I": 0x2111, "R": 0x211C, "Z": 0x2128}
+    out: list[Symbol] = []
+    for i in range(26):
+        ch = chr(ord("a") + i)  # name is the bare letter: "#a" -> fraktur a
+        out.append(Symbol(chr(lo_base + i), ch, ("fraktur", "blackletter")))
+    for i in range(26):
+        ch = chr(ord("A") + i)
+        out.append(Symbol(chr(up_hole.get(ch, up_base + i)), ch,
+                          ("fraktur", "blackletter")))
+    return out
+
+
+def _iching_symbols() -> list[Symbol]:
+    """The eight I Ching trigrams (bagua), named by their Chinese reading."""
+    data = (
+        ("qian", 0x2630, ("heaven", "sky")), ("dui", 0x2631, ("lake", "marsh")),
+        ("li", 0x2632, ("fire", "flame")), ("zhen", 0x2633, ("thunder",)),
+        ("xun", 0x2634, ("wind", "wood")), ("kan", 0x2635, ("water",)),
+        ("gen", 0x2636, ("mountain",)), ("kun", 0x2637, ("earth", "ground")),
+    )
+    return [Symbol(chr(cp) + _VS, name, ("iching", "trigram", "bagua", *kw))
+            for name, cp, kw in data]
+
+
+def _rune_symbols() -> list[Symbol]:
+    """The Elder Futhark (24 runes), each searchable by its rune name and the
+    whole set with ``#rune`` / ``#futhark``."""
+    data = (
+        ("fehu", 0x16A0, ("wealth",)), ("uruz", 0x16A2, ("aurochs",)),
+        ("thurisaz", 0x16A6, ("thorn", "giant")), ("ansuz", 0x16A8, ("god",)),
+        ("raidho", 0x16B1, ("ride", "journey")), ("kenaz", 0x16B2, ("torch",)),
+        ("gebo", 0x16B7, ("gift",)), ("wunjo", 0x16B9, ("joy",)),
+        ("hagalaz", 0x16BA, ("hail",)), ("nauthiz", 0x16BE, ("need",)),
+        ("isa", 0x16C1, ("ice",)), ("jera", 0x16C3, ("year", "harvest")),
+        ("eihwaz", 0x16C7, ("yew",)), ("perthro", 0x16C8, ("lot", "chance")),
+        ("algiz", 0x16C9, ("elk", "protection")), ("sowilo", 0x16CA, ("sun",)),
+        ("tiwaz", 0x16CF, ("tyr", "victory")), ("berkano", 0x16D2, ("birch",)),
+        ("ehwaz", 0x16D6, ("horse",)), ("mannaz", 0x16D7, ("man", "self")),
+        ("laguz", 0x16DA, ("water", "lake")), ("ingwaz", 0x16DC, ("ing",)),
+        ("dagaz", 0x16DE, ("day", "dawn")), ("othala", 0x16DF, ("heritage", "home")),
+    )
+    return [Symbol(chr(cp), name, ("rune", "futhark", *kw))
+            for name, cp, kw in data]
+
+
+def _alchemy_symbols() -> list[Symbol]:
+    """Alchemical metals and substances. (The four elements and the tria prima —
+    sulphur/salt — already live in the concept set, so they aren't repeated;
+    letter-like glyphs like quintessence/aqua-vitae are left out.)"""
+    data = (
+        ("gold", 0x1F71A, ("sol", "metal")),
+        ("silver", 0x1F71B, ("luna", "metal")),
+        ("copper", 0x1F720, ("venus", "metal")),
+        ("tin", 0x1F729, ("jupiter", "metal")),
+        ("lead", 0x1F72A, ("saturn", "metal")),
+        ("antimony", 0x1F72B, ("regulus",)),
+        ("vitriol", 0x1F716, ("sulfate", "acid")),
+        ("nitre", 0x1F715, ("saltpetre", "potash")),
+        ("vinegar", 0x1F70B, ("acetum",)),
+        ("tartar", 0x1F73F, ("potash",)),
+    )
+    return [Symbol(chr(cp) + _VS, name, ("alchemy", *kw))
+            for name, cp, kw in data]
+
+
+def _shape_symbols() -> list[Symbol]:
+    data = (
+        ("triangle", "▲", ("up", "filled")),
+        ("triangle-outline", "△", ("up", "white")),
+        ("triangle-down", "▼", ("down", "filled")),
+        ("triangle-down-outline", "▽", ("down", "white")),
+        ("diamond", "◆", ("filled",)), ("diamond-outline", "◇", ("white",)),
+        ("diamond-dot", "◈", ()), ("lozenge", "◊", ("rhombus",)),
+        ("smallsquare", "▪", ("filled",)), ("smallsquare-outline", "▫", ("white",)),
+        ("bullet", "◦", ("point",)), ("fisheye", "◉", ("circle", "dot")),
+        ("dottedcircle", "◌", ("ring", "placeholder")),
+        ("check", "✓", ("tick", "yes", "done")), ("check-heavy", "✔", ("tick",)),
+        ("xmark", "✗", ("no", "cancel", "cross")), ("xmark-heavy", "✘", ("no",)),
+        ("hexagon", "⬢", ("filled",)), ("hexagon-outline", "⬡", ("white",)),
+        ("pentagon", "⬠", ()),
+    )
+    return [Symbol(ch + _VS, name, ("shape", *kw)) for name, ch, kw in data]
+
+
+def _fraction_symbols() -> list[Symbol]:
+    data = (
+        ("half", "½", ("1/2",)), ("third", "⅓", ("1/3",)),
+        ("two-thirds", "⅔", ("2/3",)), ("quarter", "¼", ("1/4",)),
+        ("three-quarters", "¾", ("3/4",)), ("fifth", "⅕", ("1/5",)),
+        ("two-fifths", "⅖", ("2/5",)), ("three-fifths", "⅗", ("3/5",)),
+        ("four-fifths", "⅘", ("4/5",)), ("sixth", "⅙", ("1/6",)),
+        ("five-sixths", "⅚", ("5/6",)), ("eighth", "⅛", ("1/8",)),
+        ("three-eighths", "⅜", ("3/8",)), ("five-eighths", "⅝", ("5/8",)),
+        ("seven-eighths", "⅞", ("7/8",)), ("seventh", "⅐", ("1/7",)),
+        ("ninth", "⅑", ("1/9",)), ("tenth", "⅒", ("1/10",)),
+        ("zero-thirds", "↉", ("0/3",)),
+    )
+    return [Symbol(ch, name, ("fraction", *kw)) for name, ch, kw in data]
+
+
 # The active library. Extend by appending more builders' output here.
 SYMBOLS: list[Symbol] = (
     _greek_symbols() + _math_symbols() + _arrow_symbols() + _astro_symbols()
     + _weather_symbols() + _astronomy_symbols() + _object_symbols()
-    + _concept_symbols() + _cursive_symbols()
+    + _concept_symbols() + _cursive_symbols() + _fraktur_symbols()
+    + _iching_symbols() + _rune_symbols() + _alchemy_symbols()
+    + _shape_symbols() + _fraction_symbols()
 )
 
 

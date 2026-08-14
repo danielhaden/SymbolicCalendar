@@ -33,8 +33,9 @@ planetary ingresses and retrogrades, and symbolic events.
   *Propagate properties* aligns the size and position of later events that share
   a key.
 - **Symbol library** — type `#` in any event field to open a live picker over a
-  library of 250+ symbols (astrological, mathematical, arrows, weather, cursive
-  letters, and more); pick one to insert it inline.
+  library of 380+ symbols (astrological, mathematical, arrows, weather,
+  alchemical, I Ching trigrams, Elder Futhark runes, cursive and blackletter
+  alphabets, shapes, and fractions); pick one to insert it inline.
 - **Expanded day view** — double-click a tile and it animates out to fill the
   calendar, listing the day's events as a symbol with a one-line preview of its
   entry. Double-click a row and its full entry fills the frame to read or edit;

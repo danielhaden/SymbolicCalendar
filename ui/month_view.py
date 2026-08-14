@@ -208,6 +208,20 @@ class EventEdit(QLineEdit):
         self.commit_requested.emit()
 
 
+class NoteEdit(QTextEdit):
+    """Full-frame editor for an event's value (its longer entry text), shown in
+    the expanded view. Multi-line, so Enter inserts a newline; Escape cancels
+    (discarding), and the caller saves when it's dismissed another way."""
+
+    cancel_requested = Signal()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.cancel_requested.emit()
+            return
+        super().keyPressEvent(event)
+
+
 class DayCell(QPushButton):
     """A selectable day in the month grid.
 
@@ -960,9 +974,8 @@ class DayCell(QPushButton):
         bh = self._bars_height() * s + self._asc_height()
         if self._standalone:
             top = (_CANVAS_TOP + 8.0) * s  # clear of the enlarged day number
-            right = self.width() / 2.0
             bottom = self.height() - m - bh
-            rect = QRectF(left, top, right - left, bottom - top)
+            rect = QRectF(left, top, self.width() - left - m, bottom - top)
             return rect.adjusted(pad, pad, -pad, -pad)
         top = _CANVAS_MARGIN * s   # up to the tile top; the number is excluded
         rect = QRectF(left, top, self.width() - left - m,
@@ -970,35 +983,29 @@ class DayCell(QPushButton):
         return rect.adjusted(pad, pad, -pad, -pad)
 
     def _event_layout(self) -> list[tuple[int, QRectF, QRectF]]:
-        """Expanded-tile event rows laid out vertically as ``key : value``: the
-        key at the row's left, the value wrapping in the remaining width. Rows
-        grow to fit a multi-line value. Returns (index, key_rect, value_rect);
-        empty for grid tiles."""
+        """Expanded-tile event rows: the symbol (key) at the left, a single-line
+        preview of the value alongside. One fixed-height row per event (the full
+        entry opens in the frame-filling editor on double-click). Returns
+        (index, key_rect, value_rect); empty for grid tiles."""
         if not self._standalone or not self._events:
             return []
         s = self._paint_scale()
         canvas = self._canvas_rect()
         kfm = QFontMetricsF(self._expanded_key_font())
-        vfm = QFontMetricsF(self._expanded_value_font())
-        row_min = _EVENT_ROW_H * s
-        gap = 6.0 * s
+        row_h = _EVENT_ROW_H * s
+        gap = 8.0 * s
         rows = []
         y = canvas.top()
         for i, e in enumerate(self._events):
-            key_w = min(kfm.horizontalAdvance((e.key or "") + " :  "), canvas.width())
-            vx = canvas.left() + key_w
-            vw = max(0.0, canvas.right() - vx)
-            vh = 0.0
-            if e.value and vw > 0:
-                vh = vfm.boundingRect(
-                    QRectF(0, 0, vw, 1e6), Qt.TextWordWrap, e.value).height()
-            rh = max(row_min, vh)
-            if y + rh > canvas.bottom() and rows:
+            if y + row_h > canvas.bottom() and rows:
                 break  # no room for more rows
-            key_rect = QRectF(canvas.left(), y, key_w, row_min)
-            value_rect = QRectF(vx, y, vw, rh)
+            key_w = min(kfm.horizontalAdvance((e.key or "") + "  "),
+                        canvas.width())
+            key_rect = QRectF(canvas.left(), y, key_w, row_h)
+            vx = canvas.left() + key_w + 4.0 * s
+            value_rect = QRectF(vx, y, max(0.0, canvas.right() - vx), row_h)
             rows.append((i, key_rect, value_rect))
-            y += rh + gap
+            y += row_h + gap
         return rows
 
     def _expanded_key_font(self) -> QFont:
@@ -1563,21 +1570,24 @@ class DayCell(QPushButton):
         # a fixed left-half region. ---
         canvas = self._canvas_rect()
         if self._events and self._standalone:
-            # Expanded tile: a vertical list of events as "key : value" — the
-            # key at the left, its value alongside. (Only keys show in the grid.)
+            # Expanded tile: a list of events, each a symbol (key) with a
+            # single-line preview of its value. Double-click a row to open the
+            # full entry in the frame-filling editor. (Only keys show in grid.)
             kfont = self._expanded_key_font()
             vfont = self._expanded_value_font()
+            vfm = QFontMetricsF(vfont)
             for i, krect, vrect in self._event_layout():
                 e = self._events[i]
                 p.setFont(kfont)
                 p.setPen(QColor(t.TEXT))
-                p.drawText(krect, Qt.AlignLeft | Qt.AlignVCenter,
-                           e.key + (" :" if e.value else ""))
-                if e.value:
+                p.drawText(krect, Qt.AlignLeft | Qt.AlignVCenter, e.key)
+                if e.value and vrect.width() > 0:
+                    preview = " ".join(e.value.split())  # collapse newlines
                     p.setFont(vfont)
                     p.setPen(QColor(t.TEXT_MUTED))
-                    p.drawText(vrect, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
-                               e.value)
+                    p.drawText(vrect, Qt.AlignLeft | Qt.AlignVCenter,
+                               vfm.elidedText(preview, Qt.ElideRight,
+                                              vrect.width()))
         elif self._events:
             # Month grid: each event is a free-text box at its stored canvas
             # position (draggable — see the mouse handlers). Clip to the canvas
@@ -1743,12 +1753,14 @@ class MonthView(QWidget):
         self._expanded_start = QRect()
         self._collapsing = False
 
-        # Event-value editor: a multi-line box shown next to an event's key in
-        # the expanded view; saves when the user clicks away. Supports the "#"
-        # symbol lookup, same as the key editor.
-        self._note_edit = QTextEdit(self)
+        # Event-value editor: a frame-filling box holding an event's full entry
+        # in the expanded view (double-click a row to open it). Saves when
+        # dismissed (click the date number / click away), discards on Escape.
+        # Supports the "#" symbol lookup, same as the key editor.
+        self._note_edit = NoteEdit(self)
         self._note_edit.setObjectName("noteEdit")
         self._note_edit.hide()
+        self._note_edit.cancel_requested.connect(self._cancel_note)
         self._value_completer = SymbolCompleter(self._note_edit, self)
         self._editing_note_index: int | None = None
         self._note_day = None
@@ -1831,19 +1843,22 @@ class MonthView(QWidget):
         self._note_edit.setFocus()
 
     def _position_note_edit(self) -> bool:
-        """Place the value box just right of the editing event's key."""
+        """Fill the expanded tile with the value editor, leaving the day
+        number's strip clickable (click it to collapse and save)."""
         if self._editing_note_index is None:
             return False
-        krect = next((k for i, k, _ in self._expanded._event_layout()
-                      if i == self._editing_note_index), None)
-        if krect is None:
-            return False
-        tile = self._expanded.geometry()
-        x = int(tile.x() + krect.right() + 8)
-        y = int(tile.y() + krect.top())
-        w = min(280, max(140, self.width() - x - 12))
-        self._note_edit.setGeometry(x, y, w, 64)
+        r = self._expanded.geometry()
+        pad, header = 18, 64
+        self._note_edit.setGeometry(
+            r.x() + pad, r.y() + header,
+            max(0, r.width() - 2 * pad), max(0, r.height() - header - pad),
+        )
         return True
+
+    def _cancel_note(self) -> None:
+        """Discard the in-progress edit and close the editor (Escape)."""
+        self._editing_note_index = None    # clear first (hide re-fires focus)
+        self._note_edit.hide()
 
     def _save_note(self) -> None:
         if self._editing_note_index is None or self._note_day is None:

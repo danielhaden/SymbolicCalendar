@@ -26,15 +26,19 @@ planetary ingresses and retrogrades, and symbolic events.
   mark above the Moon (`~` / `‾`) marks a retrograde/direct station, and the
   Moon glyph is underlined while it is void-of-course. Hover any glyph for the
   exact times. Each planet's ingresses and retrogrades toggle in the View menu.
-- **Symbolic events** — drop key/value events onto any tile: type a key, give it
-  a value, and place or resize the box by dragging. Events can recur (daily /
-  weekly / monthly, with this-vs-all edits), and *Propagate properties* aligns
-  the size and position of later events that share a key.
+- **Symbolic events** — drop key/value events onto any tile: the **key** is a
+  symbol (or short label) shown on the grid; the **value** is a longer entry —
+  a note, a journal passage, anything. Place or resize the key box by dragging.
+  Events can recur (daily / weekly / monthly, with this-vs-all edits), and
+  *Propagate properties* aligns the size and position of later events that share
+  a key.
 - **Symbol library** — type `#` in any event field to open a live picker over a
   library of 250+ symbols (astrological, mathematical, arrows, weather, cursive
   letters, and more); pick one to insert it inline.
 - **Expanded day view** — double-click a tile and it animates out to fill the
-  calendar; click the date number to return.
+  calendar, listing the day's events as a symbol with a one-line preview of its
+  entry. Double-click a row and its full entry fills the frame to read or edit;
+  the date number returns you to the month (Escape discards an in-progress edit).
 - **Configurable location** — set your latitude/longitude/timezone (Settings →
   Set current location), which drives daylight and local ingress/station dates.
 

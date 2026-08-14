@@ -341,7 +341,8 @@ class MainWindow(QMainWindow):
             self._update_window_title()
 
     def _update_window_title(self) -> None:
-        self.setWindowTitle(f"Calendar    Location: {current_location().name}")
+        self.setWindowTitle(
+            f"Symbolic Calendar    Location: {current_location().name}")
 
     def _build_view_menu(self) -> None:
         view_menu = self.menuBar().addMenu("View")

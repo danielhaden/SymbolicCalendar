@@ -1,4 +1,4 @@
-# Calendar
+# Symbolic Calendar
 
 A modern, minimalist desktop calendar built with Python and PySide6. The
 month view is almost entirely greyscale — emphasis comes from typography and

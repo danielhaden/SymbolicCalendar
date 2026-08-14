@@ -78,8 +78,8 @@ app = BUNDLE(
     icon="assets/AppIcon.icns",
     bundle_identifier="com.danielhaden.calendar",
     info_plist={
-        "CFBundleName": "Calendar",
-        "CFBundleDisplayName": "Calendar",
+        "CFBundleName": "Symbolic Calendar",
+        "CFBundleDisplayName": "Symbolic Calendar",
         "CFBundleShortVersionString": _VERSION,
         "CFBundleVersion": _VERSION,
         "NSHighResolutionCapable": True,

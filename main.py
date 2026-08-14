@@ -88,7 +88,8 @@ def main() -> int:
         return _check_update()
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Calendar")
+    app.setApplicationName("Symbolic Calendar")
+    app.setApplicationDisplayName("Symbolic Calendar")
     app.setWindowIcon(QIcon(_asset("icon.png")))
 
     theme = ThemeManager()

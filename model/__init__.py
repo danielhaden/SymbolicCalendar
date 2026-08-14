@@ -2,7 +2,6 @@
 
 from .calendar_model import CalendarModel
 from .events import Event, Events, Occurrence, RecurrenceRule
-from .journal import Journal
 from .lunation import (
     Lunation,
     MoonAspect,
@@ -39,7 +38,6 @@ __all__ = [
     "Events",
     "Occurrence",
     "RecurrenceRule",
-    "Journal",
     "Lunation",
     "MoonAspect",
     "moon_aspects",

@@ -31,7 +31,6 @@ from model import (
     DAYLIGHT_MODES,
     CalendarModel,
     Events,
-    Journal,
     current_location,
     set_current_location,
     set_daylight_mode,
@@ -168,15 +167,14 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(720, 480)
 
         self._settings = QSettings("CalendarApp", "Calendar")
-        # One data folder holds journal.json + events.json: the folder the user
-        # picked (or the legacy journal-folder key), otherwise a per-user
-        # app-data directory. The old default resolved next to the code, which
-        # in a packaged build meant *inside the .app bundle* — avoid that.
+        # The data folder holds events.json: the folder the user picked (or the
+        # legacy "journal/folder" key, kept so an existing choice still resolves),
+        # otherwise a per-user app-data directory. The old default resolved next
+        # to the code, which in a packaged build meant *inside the .app bundle*.
         folder = (self._settings.value("data/folder", "", type=str)
                   or self._settings.value("journal/folder", "", type=str)
                   or self._default_data_folder())
         data_dir = Path(folder)
-        self._journal = Journal(data_dir / "journal.json")
         self._events = Events(data_dir / "events.json")
         # Which sun event bounds the daylight bar (persisted; applied before the
         # month view first computes its bars).
@@ -186,7 +184,7 @@ class MainWindow(QMainWindow):
             self._daylight_mode = "civil"
         set_daylight_mode(self._daylight_mode)
         self._month_view = MonthView(
-            self._model, self._theme, self._journal, self._events
+            self._model, self._theme, self._events
         )
         # Time-bar orientation is a persisted preference (Settings menu),
         # defaulting to horizontal.
@@ -322,15 +320,14 @@ class MainWindow(QMainWindow):
 
     def _update_data_folder_label(self) -> None:
         self._data_folder_action.setText(
-            f"Calendar data folder: {self._journal.folder()}"
+            f"Calendar data folder: {self._events.folder()}"
         )
 
     def _on_set_data_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Calendar Data Folder", str(self._journal.folder())
+            self, "Select Calendar Data Folder", str(self._events.folder())
         )
         if folder:
-            self._journal.set_folder(folder)
             self._events.set_folder(folder)
             self._settings.setValue("data/folder", folder)
             self._update_data_folder_label()

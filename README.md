@@ -1,10 +1,10 @@
-# Calendar
+# Symbolic Calendar
 
 A modern, minimalist desktop calendar built with Python and PySide6. The
 month view is almost entirely greyscale — emphasis comes from typography and
 shape rather than color — and each day tile layers in astronomical and
 personal context: moon phases, civil-daylight hours, a zodiac band carrying
-planetary ingresses and retrogrades, symbolic events, and a per-day journal.
+planetary ingresses and retrogrades, and symbolic events.
 
 ## Features
 
@@ -26,19 +26,20 @@ planetary ingresses and retrogrades, symbolic events, and a per-day journal.
   mark above the Moon (`~` / `‾`) marks a retrograde/direct station, and the
   Moon glyph is underlined while it is void-of-course. Hover any glyph for the
   exact times. Each planet's ingresses and retrogrades toggle in the View menu.
-- **Symbolic events** — drop key/value events onto any tile: type a key, give it
-  a value, and place or resize the box by dragging. Events can recur (daily /
-  weekly / monthly, with this-vs-all edits), and *Propagate properties* aligns
-  the size and position of later events that share a key.
+- **Symbolic events** — drop key/value events onto any tile: the **key** is a
+  symbol (or short label) shown on the grid; the **value** is a longer entry —
+  a note, a journal passage, anything. Place or resize the key box by dragging.
+  Events can recur (daily / weekly / monthly, with this-vs-all edits), and
+  *Propagate properties* aligns the size and position of later events that share
+  a key.
 - **Symbol library** — type `#` in any event field to open a live picker over a
-  library of 250+ symbols (astrological, mathematical, arrows, weather, cursive
-  letters, and more); pick one to insert it inline.
+  library of 380+ symbols (astrological, mathematical, arrows, weather,
+  alchemical, I Ching trigrams, Elder Futhark runes, cursive and blackletter
+  alphabets, shapes, and fractions); pick one to insert it inline.
 - **Expanded day view** — double-click a tile and it animates out to fill the
-  calendar; click the date number to return.
-- **Journal** — one entry per day. A star by the date marks a tile with an
-  entry (click it to open the day). In the expanded view, click the corner to
-  write/edit; right-click to delete. Entries are stored as JSON in a folder you
-  choose.
+  calendar, listing the day's events as a symbol with a one-line preview of its
+  entry. Double-click a row and its full entry fills the frame to read or edit;
+  the date number returns you to the month (Escape discards an in-progress edit).
 - **Configurable location** — set your latitude/longitude/timezone (Settings →
   Set current location), which drives daylight and local ingress/station dates.
 
@@ -76,12 +77,10 @@ calendar/
 │   ├── ascendant.py       # rising sign through the day
 │   ├── daylight.py        # civil-twilight daylight window + location
 │   ├── events.py          # key/value events + recurrence
-│   ├── symbols.py         # the searchable symbol library
-│   └── journal.py         # per-day journal, JSON-backed
+│   └── symbols.py         # the searchable symbol library
 └── ui/                  # PySide6 widgets
     ├── main_window.py       # window, menu bar
     ├── month_view.py        # the month grid + day tiles + zodiac band + expanded view
-    ├── day_view.py          # expanded day detail
     ├── symbol_completer.py  # the `#name` symbol picker
     ├── recurrence_dialog.py # repeat / this-vs-all editing
     ├── propagate_dialog.py  # propagate size/position to later events
@@ -90,15 +89,15 @@ calendar/
 ```
 
 The codebase keeps a clean separation: `model/` holds pure business logic
-(astronomy, journal, calendar math) and `ui/` holds the PySide6 presentation.
+(astronomy, events, calendar math) and `ui/` holds the PySide6 presentation.
 
 ## Configuration
 
 - **Location** — Settings → *Set current location…* (latitude, longitude, IANA
   timezone). Stored via `QSettings`.
 - **Calendar data folder** — Settings → *Set calendar data folder…* (the current
-  location is shown in the menu). Stored via `QSettings`; journal entries and
-  events live in `<folder>/journal.json` and `<folder>/events.json`.
+  location is shown in the menu). Stored via `QSettings`; events live in
+  `<folder>/events.json`.
 
 ## Notes
 

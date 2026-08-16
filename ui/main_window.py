@@ -31,6 +31,7 @@ from model import (
     DAYLIGHT_MODES,
     CalendarModel,
     Events,
+    Weather,
     current_location,
     set_current_location,
     set_daylight_mode,
@@ -176,6 +177,7 @@ class MainWindow(QMainWindow):
                   or self._default_data_folder())
         data_dir = Path(folder)
         self._events = Events(data_dir / "events.json")
+        self._weather = Weather(data_dir / "weather.json")
         # Which sun event bounds the daylight bar (persisted; applied before the
         # month view first computes its bars).
         self._daylight_mode = self._settings.value(
@@ -184,7 +186,7 @@ class MainWindow(QMainWindow):
             self._daylight_mode = "civil"
         set_daylight_mode(self._daylight_mode)
         self._month_view = MonthView(
-            self._model, self._theme, self._events
+            self._model, self._theme, self._events, self._weather
         )
         # Time-bar orientation is a persisted preference (Settings menu),
         # defaulting to horizontal.
@@ -203,6 +205,11 @@ class MainWindow(QMainWindow):
         self._show_moon_phase = self._settings.value(
             "view/show_moon_phase", False, type=bool)
         self._month_view.set_moon_glyph_visible(self._show_moon_phase)
+        # Weather curves: a persisted preference, off by default (enabling it
+        # makes the app's first content network call, so it stays opt-in).
+        self._show_weather = self._settings.value(
+            "view/show_weather", False, type=bool)
+        self._month_view.set_weather_visible(self._show_weather)
         # Central column: an (initially hidden) update banner over the month view.
         self._update_banner = _UpdateBanner(self._theme)
         central = QWidget()
@@ -302,6 +309,11 @@ class MainWindow(QMainWindow):
         self._settings.setValue("view/show_moon_phase", visible)
         self._month_view.set_moon_glyph_visible(visible)
 
+    def _on_toggle_weather(self, visible: bool) -> None:
+        self._show_weather = visible
+        self._settings.setValue("view/show_weather", visible)
+        self._month_view.set_weather_visible(visible)
+
     def _on_set_daylight_mode(self, mode: str) -> None:
         self._daylight_mode = mode
         self._settings.setValue("view/daylight_mode", mode)
@@ -329,6 +341,7 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self._events.set_folder(folder)
+            self._weather.set_folder(folder)
             self._settings.setValue("data/folder", folder)
             self._update_data_folder_label()
             self._month_view.reload()
@@ -365,6 +378,11 @@ class MainWindow(QMainWindow):
         ascendant_action.setCheckable(True)
         ascendant_action.setChecked(True)
         ascendant_action.toggled.connect(self._month_view.set_ascendant_visible)
+
+        weather_action = view_menu.addAction("Show Weather")
+        weather_action.setCheckable(True)
+        weather_action.setChecked(self._show_weather)  # persisted; off by default
+        weather_action.toggled.connect(self._on_toggle_weather)
 
         ingress_menu = view_menu.addMenu("Planet Ingresses")
         for key, name, _glyph in PLANETS:

@@ -175,6 +175,12 @@ class Weather:
         except Exception:
             pass
 
+    def reload(self) -> None:
+        """Re-read the cache file from disk. Used after a background fetch (run
+        against a separate instance) writes new data, so this reader picks it up
+        without sharing mutable state across threads."""
+        self._load()
+
     # -- queries (cache-only) --------------------------------------------
     def get(self, day: date, location: Location | None = None) -> DayWeather | None:
         loc = location or current_location()

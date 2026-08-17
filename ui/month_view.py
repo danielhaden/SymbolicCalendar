@@ -139,6 +139,9 @@ _WX_BAND_H = 22.0            # unscaled height of the curve band
 _WX_BAND_GAP = 2.0          # gap above the bottom bar strip
 _WX_TEMP_WIDTH = 1.3        # temperature stroke width
 _WX_PRESS_WIDTH = 1.1       # pressure stroke width
+_WX_TEMP_ALPHA = 145        # temperature line opacity over TEXT (lower = greyer)
+_WX_PRESS_ALPHA = 100       # pressure line opacity over TEXT
+_WX_DOT_ALPHA = 130         # pressure high/low dots (a touch above the line)
 
 
 def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
@@ -1633,16 +1636,16 @@ class DayCell(QPushButton):
         p.setClipRect(QRectF(0.0, y_top - 2.0 * s, self.width(),
                              y_bot - y_top + 4.0 * s))
         stroke(self._wx_series_points(temp_series, t_lo, t_hi, band),
-               _WX_TEMP_WIDTH, 205)
+               _WX_TEMP_WIDTH, _WX_TEMP_ALPHA)
         stroke(self._wx_series_points(press_series, p_lo, p_hi, band),
-               _WX_PRESS_WIDTH, 140, dash=[2.0, 2.0])
+               _WX_PRESS_WIDTH, _WX_PRESS_ALPHA, dash=[2.0, 2.0])
         # Small dots at the highest and lowest pressure so far (no text — the
         # hover scrubber surfaces the values).
         pvals = [(i, v) for i, v in enumerate(press_series) if v is not None]
         n = len(press_series)
         if pvals and x1 > x0 and n > 1:
             rng = (p_hi - p_lo) or 1.0
-            dot = QColor(t.TEXT); dot.setAlpha(int(200 * dim))
+            dot = QColor(t.TEXT); dot.setAlpha(int(_WX_DOT_ALPHA * dim))
             p.setPen(Qt.NoPen); p.setBrush(dot)
             for idx in (max(pvals, key=lambda iv: iv[1])[0],
                         min(pvals, key=lambda iv: iv[1])[0]):

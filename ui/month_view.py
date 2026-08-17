@@ -9,7 +9,7 @@ from the ThemeManager, and styles are rebuilt when the theme changes.
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -1916,17 +1916,20 @@ class _WeatherWorker(QThread):
 
     done = Signal()
 
-    def __init__(self, path, location, start, end, parent=None) -> None:
+    def __init__(self, path, location, start, end, parent=None,
+                 force_current: bool = False) -> None:
         super().__init__(parent)
         self._path = path
         self._location = location
         self._start = start
         self._end = end
+        self._force_current = force_current
 
     def run(self) -> None:
         try:
             Weather(self._path).ensure_range(
-                self._start, self._end, self._location)
+                self._start, self._end, self._location,
+                force_current=self._force_current)
         except Exception:
             pass
         self.done.emit()
@@ -1948,6 +1951,12 @@ class MonthView(QWidget):
         self._show_weather = False
         self._wx_worker: _WeatherWorker | None = None
         self._wx_range: tuple[date, date] | None = None
+        # Refresh today's weather at the top of each hour (only while weather is
+        # shown). Single-shot + re-armed each fire so it stays clock-aligned and
+        # survives sleep/wake without drifting.
+        self._wx_hourly = QTimer(self)
+        self._wx_hourly.setSingleShot(True)
+        self._wx_hourly.timeout.connect(self._on_wx_hourly)
         # Planet ingresses / retrograde stations to mark (all on by default;
         # toggled via the View menu).
         self._enabled_planets: set[str] = {key for key, _, _ in PLANETS}
@@ -2500,6 +2509,9 @@ class MonthView(QWidget):
         if visible:
             self._apply_weather()
             self._fetch_weather()
+            self._schedule_wx_hourly()   # begin the on-the-hour refresh
+        else:
+            self._wx_hourly.stop()
 
     def _visible_dates(self) -> tuple[date, date] | None:
         days = [c._date for c in self._cells if c._date is not None]
@@ -2532,8 +2544,10 @@ class MonthView(QWidget):
         for c in self._cells:
             c.set_weather(data.get(c._date) if c._date else None, scale)
 
-    def _fetch_weather(self) -> None:
-        """Fetch the visible month's missing/stale weather on a worker thread."""
+    def _fetch_weather(self, force_current: bool = False) -> None:
+        """Fetch the visible month's missing/stale weather on a worker thread.
+        ``force_current`` also refreshes today even if its cache is still fresh
+        (used by the hourly refresh)."""
         if self._weather is None or not self._show_weather:
             return
         if self._wx_worker is not None and self._wx_worker.isRunning():
@@ -2544,9 +2558,21 @@ class MonthView(QWidget):
         path = self._weather.folder() / "weather.json"
         self._wx_range = rng
         self._wx_worker = _WeatherWorker(
-            path, current_location(), rng[0], rng[1], self)
+            path, current_location(), rng[0], rng[1], self,
+            force_current=force_current)
         self._wx_worker.done.connect(self._on_weather_fetched)
         self._wx_worker.start()
+
+    def _schedule_wx_hourly(self) -> None:
+        """Arm the hourly refresh for the next top of the hour."""
+        now = datetime.now()
+        nxt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        self._wx_hourly.start(max(1000, int((nxt - now).total_seconds() * 1000)))
+
+    def _on_wx_hourly(self) -> None:
+        if self._show_weather:
+            self._fetch_weather(force_current=True)   # refresh today's row
+        self._schedule_wx_hourly()   # re-arm for the following hour
 
     def _on_weather_fetched(self) -> None:
         self._wx_worker = None

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -1548,6 +1549,25 @@ class DayCell(QPushButton):
         left = (bars + 4) if bars else 9
         return QRectF(0, 0, (left + 34) * s, 34 * s)
 
+    def _wx_cutoff_index(self) -> int:
+        """The last hourly index to draw: the current hour in the location's
+        local time on today's tile (so the forecast tail of today isn't shown),
+        else 23 — the whole day — for past days."""
+        if not self._today:
+            return 23
+        try:
+            now = datetime.now(ZoneInfo(current_location().tz_name))
+        except Exception:
+            now = datetime.now()
+        return max(0, min(23, now.hour))
+
+    def _wx_clip(self, series, cutoff: int):
+        """``series`` with any hour past ``cutoff`` blanked to None (so the curve
+        stops there); returned unchanged when the whole day is in view."""
+        if cutoff >= len(series) - 1:
+            return series
+        return [v if i <= cutoff else None for i, v in enumerate(series)]
+
     def _wx_series_points(self, series, lo: float, hi: float,
                           band: tuple[float, float, float, float]) -> list[list]:
         """Split an hourly ``series`` into polyline segments (breaking across
@@ -1578,8 +1598,13 @@ class DayCell(QPushButton):
             return
         dw = self._weather
         s = self._paint_scale()
-        temps = [v for v in dw.temp_f if v is not None]
-        press = [v for v in dw.pressure_hpa if v is not None]
+        # On today's tile the forecast endpoint returns the whole day; only the
+        # elapsed hours are real, so draw up to the current local hour.
+        cutoff = self._wx_cutoff_index()
+        temp_series = self._wx_clip(dw.temp_f, cutoff)
+        press_series = self._wx_clip(dw.pressure_hpa, cutoff)
+        temps = [v for v in temp_series if v is not None]
+        press = [v for v in press_series if v is not None]
         if not temps and not press:
             return
         if self._wx_scale is not None:
@@ -1607,14 +1632,14 @@ class DayCell(QPushButton):
         p.save()
         p.setClipRect(QRectF(0.0, y_top - 2.0 * s, self.width(),
                              y_bot - y_top + 4.0 * s))
-        stroke(self._wx_series_points(dw.temp_f, t_lo, t_hi, band),
+        stroke(self._wx_series_points(temp_series, t_lo, t_hi, band),
                _WX_TEMP_WIDTH, 205)
-        stroke(self._wx_series_points(dw.pressure_hpa, p_lo, p_hi, band),
+        stroke(self._wx_series_points(press_series, p_lo, p_hi, band),
                _WX_PRESS_WIDTH, 140, dash=[2.0, 2.0])
-        # Small dots at the day's highest and lowest pressure (no text — the
+        # Small dots at the highest and lowest pressure so far (no text — the
         # hover scrubber surfaces the values).
-        pvals = [(i, v) for i, v in enumerate(dw.pressure_hpa) if v is not None]
-        n = len(dw.pressure_hpa)
+        pvals = [(i, v) for i, v in enumerate(press_series) if v is not None]
+        n = len(press_series)
         if pvals and x1 > x0 and n > 1:
             rng = (p_hi - p_lo) or 1.0
             dot = QColor(t.TEXT); dot.setAlpha(int(200 * dim))
@@ -1622,20 +1647,22 @@ class DayCell(QPushButton):
             for idx in (max(pvals, key=lambda iv: iv[1])[0],
                         min(pvals, key=lambda iv: iv[1])[0]):
                 x = x0 + idx / (n - 1) * (x1 - x0)
-                frac = max(0.0, min(1.0, (dw.pressure_hpa[idx] - p_lo) / rng))
+                frac = max(0.0, min(1.0, (press_series[idx] - p_lo) / rng))
                 p.drawEllipse(QPointF(x, y_bot - frac * (y_bot - y_top)),
                               1.7 * s, 1.7 * s)
         p.restore()
 
         if self._weather_hover is not None:
-            self._draw_weather_scrub(p, t, band, (t_lo, t_hi, p_lo, p_hi))
+            self._draw_weather_scrub(p, t, band, (t_lo, t_hi, p_lo, p_hi), cutoff)
 
     def _draw_weather_scrub(self, p: QPainter, t: Theme,
                             band: tuple[float, float, float, float],
-                            scale: tuple[float, float, float, float]) -> None:
+                            scale: tuple[float, float, float, float],
+                            cutoff: int) -> None:
         """Grid-tile hover scrubber: snap to the hovered hour, pick the curve
         nearest the cursor, and draw a vertical line from the band base up to it,
-        a dot on the curve, and that point's value."""
+        a dot on the curve, and that point's value. Clamped to ``cutoff`` so
+        today's tile can't scrub into not-yet-elapsed hours."""
         pos = self._weather_hover
         if pos is None:
             return
@@ -1646,7 +1673,7 @@ class DayCell(QPushButton):
         n = len(dw.temp_f) or 1
         hx = max(x0, min(x1, pos.x()))
         i = round((hx - x0) / (x1 - x0) * (n - 1)) if x1 > x0 and n > 1 else 0
-        i = max(0, min(n - 1, i))
+        i = max(0, min(n - 1, cutoff, i))
         xi = x0 + (i / (n - 1)) * (x1 - x0) if n > 1 else x0
 
         def y_of(v, lo, hi):

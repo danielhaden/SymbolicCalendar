@@ -138,7 +138,6 @@ _WX_BAND_H = 22.0            # unscaled height of the curve band
 _WX_BAND_GAP = 2.0          # gap above the bottom bar strip
 _WX_TEMP_WIDTH = 1.3        # temperature stroke width
 _WX_PRESS_WIDTH = 1.1       # pressure stroke width
-_WX_LABEL_PX = 8.0          # T / P end-label size
 
 
 def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
@@ -1598,36 +1597,20 @@ class DayCell(QPushButton):
             if dash:
                 pen.setDashPattern(dash)
             p.setPen(pen); p.setBrush(Qt.NoBrush)
-            last = None
             for seg in segs:
                 if len(seg) >= 2:
                     path = QPainterPath(seg[0])
                     for pt in seg[1:]:
                         path.lineTo(pt)
                     p.drawPath(path)
-                if seg:
-                    last = seg[-1]
-            return last
-
-        def label(pt, ch, alpha):
-            if pt is None:
-                return
-            col = QColor(t.TEXT); col.setAlpha(int(alpha * dim)); p.setPen(col)
-            box = _WX_LABEL_PX * 1.5 * s
-            p.drawText(QRectF(pt.x() - box, pt.y() - box / 2, box - 1.0 * s, box),
-                       Qt.AlignRight | Qt.AlignVCenter, ch)
 
         p.save()
         p.setClipRect(QRectF(0.0, y_top - 2.0 * s, self.width(),
                              y_bot - y_top + 4.0 * s))
-        t_end = stroke(self._wx_series_points(dw.temp_f, t_lo, t_hi, band),
-                       _WX_TEMP_WIDTH, 205)
-        p_end = stroke(self._wx_series_points(dw.pressure_hpa, p_lo, p_hi, band),
-                       _WX_PRESS_WIDTH, 140, dash=[2.0, 2.0])
-        font = QFont(self.font()); font.setPixelSize(max(1, round(_WX_LABEL_PX * s)))
-        p.setFont(font)
-        label(t_end, "T", 205)
-        label(p_end, "P", 150)
+        stroke(self._wx_series_points(dw.temp_f, t_lo, t_hi, band),
+               _WX_TEMP_WIDTH, 205)
+        stroke(self._wx_series_points(dw.pressure_hpa, p_lo, p_hi, band),
+               _WX_PRESS_WIDTH, 140, dash=[2.0, 2.0])
         # Small dots at the day's highest and lowest pressure (no text — the
         # hover scrubber surfaces the values).
         pvals = [(i, v) for i, v in enumerate(dw.pressure_hpa) if v is not None]

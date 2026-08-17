@@ -231,9 +231,10 @@ class MainWindow(QMainWindow):
         self._today_timer.start()
 
         # Check GitHub for a newer release, off the UI thread. Packaged builds
-        # only (set CALENDAR_FORCE_UPDATE_CHECK=1 to exercise it from source).
+        # only (set SYMBOLIC_CALENDAR_FORCE_UPDATE_CHECK=1 to exercise from source).
         self._update_worker: _UpdateWorker | None = None
-        if getattr(sys, "frozen", False) or os.environ.get("CALENDAR_FORCE_UPDATE_CHECK"):
+        if getattr(sys, "frozen", False) \
+                or os.environ.get("SYMBOLIC_CALENDAR_FORCE_UPDATE_CHECK"):
             self._update_worker = _UpdateWorker(self._version, self)
             self._update_worker.found.connect(self._on_update_found)
             self._update_worker.start()
@@ -332,12 +333,12 @@ class MainWindow(QMainWindow):
 
     def _update_data_folder_label(self) -> None:
         self._data_folder_action.setText(
-            f"Calendar data folder: {self._events.folder()}"
+            f"Symbolic Calendar data folder: {self._events.folder()}"
         )
 
     def _on_set_data_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Calendar Data Folder", str(self._events.folder())
+            self, "Select Symbolic Calendar Data Folder", str(self._events.folder())
         )
         if folder:
             self._events.set_folder(folder)

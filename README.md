@@ -95,7 +95,7 @@ The codebase keeps a clean separation: `model/` holds pure business logic
 
 - **Location** — Settings → *Set current location…* (latitude, longitude, IANA
   timezone). Stored via `QSettings`.
-- **Calendar data folder** — Settings → *Set calendar data folder…* (the current
+- **Data folder** — Settings → *Set Symbolic Calendar data folder…* (the current
   location is shown in the menu). Stored via `QSettings`; events live in
   `<folder>/events.json`.
 

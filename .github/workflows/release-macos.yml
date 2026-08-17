@@ -40,31 +40,31 @@ jobs:
 
       - name: Build .app (PyInstaller)
         env:
-          CALENDAR_VERSION: ${{ env.VERSION }}
-        run: pyinstaller --noconfirm --clean Calendar.spec
+          SYMBOLIC_CALENDAR_VERSION: ${{ env.VERSION }}
+        run: pyinstaller --noconfirm --clean SymbolicCalendar.spec
 
       - name: Smoke test (moon data computes inside the bundle)
-        run: dist/Calendar.app/Contents/MacOS/Calendar --selftest
+        run: "dist/Symbolic Calendar.app/Contents/MacOS/SymbolicCalendar --selftest"
 
       - name: Package DMG
         run: |
           STAGE="$(mktemp -d)"
-          cp -R dist/Calendar.app "$STAGE/Calendar.app"
+          cp -R "dist/Symbolic Calendar.app" "$STAGE/Symbolic Calendar.app"
           ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname Calendar -srcfolder "$STAGE" \
-            -ov -format UDZO "Calendar-${VERSION}-arm64.dmg"
+          hdiutil create -volname "Symbolic Calendar" -srcfolder "$STAGE" \
+            -ov -format UDZO "SymbolicCalendar-${VERSION}-arm64.dmg"
           rm -rf "$STAGE"
 
       - name: Attach DMG to the release (tag pushes)
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: Calendar-*.dmg
+          files: SymbolicCalendar-*.dmg
           fail_on_unmatched_files: true
 
       - name: Upload DMG as a build artifact (manual runs)
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: Calendar-${{ env.VERSION }}-arm64-dmg
-          path: Calendar-*.dmg
+          name: SymbolicCalendar-${{ env.VERSION }}-arm64-dmg
+          path: SymbolicCalendar-*.dmg

@@ -9,7 +9,8 @@ from the ThemeManager, and styles are rebuilt when the theme changes.
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -138,6 +139,9 @@ _WX_BAND_H = 22.0            # unscaled height of the curve band
 _WX_BAND_GAP = 2.0          # gap above the bottom bar strip
 _WX_TEMP_WIDTH = 1.3        # temperature stroke width
 _WX_PRESS_WIDTH = 1.1       # pressure stroke width
+_WX_TEMP_ALPHA = 145        # temperature line opacity over TEXT (lower = greyer)
+_WX_PRESS_ALPHA = 100       # pressure line opacity over TEXT
+_WX_DOT_ALPHA = 130         # pressure high/low dots (a touch above the line)
 
 
 def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
@@ -1548,6 +1552,25 @@ class DayCell(QPushButton):
         left = (bars + 4) if bars else 9
         return QRectF(0, 0, (left + 34) * s, 34 * s)
 
+    def _wx_cutoff_index(self) -> int:
+        """The last hourly index to draw: the current hour in the location's
+        local time on today's tile (so the forecast tail of today isn't shown),
+        else 23 — the whole day — for past days."""
+        if not self._today:
+            return 23
+        try:
+            now = datetime.now(ZoneInfo(current_location().tz_name))
+        except Exception:
+            now = datetime.now()
+        return max(0, min(23, now.hour))
+
+    def _wx_clip(self, series, cutoff: int):
+        """``series`` with any hour past ``cutoff`` blanked to None (so the curve
+        stops there); returned unchanged when the whole day is in view."""
+        if cutoff >= len(series) - 1:
+            return series
+        return [v if i <= cutoff else None for i, v in enumerate(series)]
+
     def _wx_series_points(self, series, lo: float, hi: float,
                           band: tuple[float, float, float, float]) -> list[list]:
         """Split an hourly ``series`` into polyline segments (breaking across
@@ -1578,8 +1601,13 @@ class DayCell(QPushButton):
             return
         dw = self._weather
         s = self._paint_scale()
-        temps = [v for v in dw.temp_f if v is not None]
-        press = [v for v in dw.pressure_hpa if v is not None]
+        # On today's tile the forecast endpoint returns the whole day; only the
+        # elapsed hours are real, so draw up to the current local hour.
+        cutoff = self._wx_cutoff_index()
+        temp_series = self._wx_clip(dw.temp_f, cutoff)
+        press_series = self._wx_clip(dw.pressure_hpa, cutoff)
+        temps = [v for v in temp_series if v is not None]
+        press = [v for v in press_series if v is not None]
         if not temps and not press:
             return
         if self._wx_scale is not None:
@@ -1607,35 +1635,37 @@ class DayCell(QPushButton):
         p.save()
         p.setClipRect(QRectF(0.0, y_top - 2.0 * s, self.width(),
                              y_bot - y_top + 4.0 * s))
-        stroke(self._wx_series_points(dw.temp_f, t_lo, t_hi, band),
-               _WX_TEMP_WIDTH, 205)
-        stroke(self._wx_series_points(dw.pressure_hpa, p_lo, p_hi, band),
-               _WX_PRESS_WIDTH, 140, dash=[2.0, 2.0])
-        # Small dots at the day's highest and lowest pressure (no text — the
+        stroke(self._wx_series_points(temp_series, t_lo, t_hi, band),
+               _WX_TEMP_WIDTH, _WX_TEMP_ALPHA)
+        stroke(self._wx_series_points(press_series, p_lo, p_hi, band),
+               _WX_PRESS_WIDTH, _WX_PRESS_ALPHA, dash=[2.0, 2.0])
+        # Small dots at the highest and lowest pressure so far (no text — the
         # hover scrubber surfaces the values).
-        pvals = [(i, v) for i, v in enumerate(dw.pressure_hpa) if v is not None]
-        n = len(dw.pressure_hpa)
+        pvals = [(i, v) for i, v in enumerate(press_series) if v is not None]
+        n = len(press_series)
         if pvals and x1 > x0 and n > 1:
             rng = (p_hi - p_lo) or 1.0
-            dot = QColor(t.TEXT); dot.setAlpha(int(200 * dim))
+            dot = QColor(t.TEXT); dot.setAlpha(int(_WX_DOT_ALPHA * dim))
             p.setPen(Qt.NoPen); p.setBrush(dot)
             for idx in (max(pvals, key=lambda iv: iv[1])[0],
                         min(pvals, key=lambda iv: iv[1])[0]):
                 x = x0 + idx / (n - 1) * (x1 - x0)
-                frac = max(0.0, min(1.0, (dw.pressure_hpa[idx] - p_lo) / rng))
+                frac = max(0.0, min(1.0, (press_series[idx] - p_lo) / rng))
                 p.drawEllipse(QPointF(x, y_bot - frac * (y_bot - y_top)),
                               1.7 * s, 1.7 * s)
         p.restore()
 
         if self._weather_hover is not None:
-            self._draw_weather_scrub(p, t, band, (t_lo, t_hi, p_lo, p_hi))
+            self._draw_weather_scrub(p, t, band, (t_lo, t_hi, p_lo, p_hi), cutoff)
 
     def _draw_weather_scrub(self, p: QPainter, t: Theme,
                             band: tuple[float, float, float, float],
-                            scale: tuple[float, float, float, float]) -> None:
+                            scale: tuple[float, float, float, float],
+                            cutoff: int) -> None:
         """Grid-tile hover scrubber: snap to the hovered hour, pick the curve
         nearest the cursor, and draw a vertical line from the band base up to it,
-        a dot on the curve, and that point's value."""
+        a dot on the curve, and that point's value. Clamped to ``cutoff`` so
+        today's tile can't scrub into not-yet-elapsed hours."""
         pos = self._weather_hover
         if pos is None:
             return
@@ -1646,7 +1676,7 @@ class DayCell(QPushButton):
         n = len(dw.temp_f) or 1
         hx = max(x0, min(x1, pos.x()))
         i = round((hx - x0) / (x1 - x0) * (n - 1)) if x1 > x0 and n > 1 else 0
-        i = max(0, min(n - 1, i))
+        i = max(0, min(n - 1, cutoff, i))
         xi = x0 + (i / (n - 1)) * (x1 - x0) if n > 1 else x0
 
         def y_of(v, lo, hi):
@@ -1916,17 +1946,20 @@ class _WeatherWorker(QThread):
 
     done = Signal()
 
-    def __init__(self, path, location, start, end, parent=None) -> None:
+    def __init__(self, path, location, start, end, parent=None,
+                 force_current: bool = False) -> None:
         super().__init__(parent)
         self._path = path
         self._location = location
         self._start = start
         self._end = end
+        self._force_current = force_current
 
     def run(self) -> None:
         try:
             Weather(self._path).ensure_range(
-                self._start, self._end, self._location)
+                self._start, self._end, self._location,
+                force_current=self._force_current)
         except Exception:
             pass
         self.done.emit()
@@ -1948,6 +1981,12 @@ class MonthView(QWidget):
         self._show_weather = False
         self._wx_worker: _WeatherWorker | None = None
         self._wx_range: tuple[date, date] | None = None
+        # Refresh today's weather at the top of each hour (only while weather is
+        # shown). Single-shot + re-armed each fire so it stays clock-aligned and
+        # survives sleep/wake without drifting.
+        self._wx_hourly = QTimer(self)
+        self._wx_hourly.setSingleShot(True)
+        self._wx_hourly.timeout.connect(self._on_wx_hourly)
         # Planet ingresses / retrograde stations to mark (all on by default;
         # toggled via the View menu).
         self._enabled_planets: set[str] = {key for key, _, _ in PLANETS}
@@ -2500,6 +2539,9 @@ class MonthView(QWidget):
         if visible:
             self._apply_weather()
             self._fetch_weather()
+            self._schedule_wx_hourly()   # begin the on-the-hour refresh
+        else:
+            self._wx_hourly.stop()
 
     def _visible_dates(self) -> tuple[date, date] | None:
         days = [c._date for c in self._cells if c._date is not None]
@@ -2532,8 +2574,10 @@ class MonthView(QWidget):
         for c in self._cells:
             c.set_weather(data.get(c._date) if c._date else None, scale)
 
-    def _fetch_weather(self) -> None:
-        """Fetch the visible month's missing/stale weather on a worker thread."""
+    def _fetch_weather(self, force_current: bool = False) -> None:
+        """Fetch the visible month's missing/stale weather on a worker thread.
+        ``force_current`` also refreshes today even if its cache is still fresh
+        (used by the hourly refresh)."""
         if self._weather is None or not self._show_weather:
             return
         if self._wx_worker is not None and self._wx_worker.isRunning():
@@ -2544,9 +2588,21 @@ class MonthView(QWidget):
         path = self._weather.folder() / "weather.json"
         self._wx_range = rng
         self._wx_worker = _WeatherWorker(
-            path, current_location(), rng[0], rng[1], self)
+            path, current_location(), rng[0], rng[1], self,
+            force_current=force_current)
         self._wx_worker.done.connect(self._on_weather_fetched)
         self._wx_worker.start()
+
+    def _schedule_wx_hourly(self) -> None:
+        """Arm the hourly refresh for the next top of the hour."""
+        now = datetime.now()
+        nxt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        self._wx_hourly.start(max(1000, int((nxt - now).total_seconds() * 1000)))
+
+    def _on_wx_hourly(self) -> None:
+        if self._show_weather:
+            self._fetch_weather(force_current=True)   # refresh today's row
+        self._schedule_wx_hourly()   # re-arm for the following hour
 
     def _on_weather_fetched(self) -> None:
         self._wx_worker = None

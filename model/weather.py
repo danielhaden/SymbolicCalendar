@@ -201,10 +201,14 @@ class Weather:
     # -- fetch (network; run off the UI thread) --------------------------
     def ensure_range(self, start: date, end: date,
                      location: Location | None = None,
-                     today: date | None = None) -> dict[date, DayWeather]:
+                     today: date | None = None,
+                     force_current: bool = False) -> dict[date, DayWeather]:
         """Fetch any missing or stale days in ``start..end`` (clamped to today —
         no future), update the cache, and return the cached range. Never raises;
-        an offline call just returns whatever is already cached."""
+        an offline call just returns whatever is already cached.
+
+        ``force_current`` refetches today's row even if it's still within the TTL
+        (used by the on-the-hour refresh, which wants fresh data regardless)."""
         loc = location or current_location()
         today = today or date.today()
         end = min(end, today)                 # no future weather
@@ -213,7 +217,7 @@ class Weather:
             return self.range(start, end, loc)
 
         needed = [d for d in _daterange(start, end)
-                  if self._needs_fetch(loc, d, today)]
+                  if self._needs_fetch(loc, d, today, force_current)]
         if not needed:
             return self.range(start, end, loc)
 
@@ -232,12 +236,15 @@ class Weather:
             self._save()
         return self.range(start, end, loc)
 
-    def _needs_fetch(self, location: Location, day: date, today: date) -> bool:
+    def _needs_fetch(self, location: Location, day: date, today: date,
+                     force_current: bool = False) -> bool:
         dw = self.get(day, location)
         if dw is None:
             return True
         if day < today:
             return False  # a past day is an observation; it won't change
+        if force_current:
+            return True   # on-the-hour refresh: always refresh today
         # today: refetch once the cached row goes stale
         return _age(dw.fetched_at) > _CURRENT_TTL
 

@@ -1,17 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller build spec for the Calendar app (macOS .app bundle).
+"""PyInstaller build spec for Symbolic Calendar (macOS .app bundle).
 
-Build:  pyinstaller --noconfirm Calendar.spec
-Output: dist/Calendar.app
+Build:  pyinstaller --noconfirm SymbolicCalendar.spec
+Output: dist/Symbolic Calendar.app
 """
 
 import os
 
 from PyInstaller.utils.hooks import collect_all
 
-# Version stamped into the bundle; the release workflow sets CALENDAR_VERSION
-# from the git tag so the .app version tracks the release.
-_VERSION = os.environ.get("CALENDAR_VERSION", "1.0.0")
+# Version stamped into the bundle; the release workflow sets
+# SYMBOLIC_CALENDAR_VERSION from the git tag so the .app version tracks the
+# release.
+_VERSION = os.environ.get("SYMBOLIC_CALENDAR_VERSION", "1.0.0")
 
 # Bundle our runtime assets (icon.png resolved via sys._MEIPASS at runtime).
 datas = [("assets", "assets")]
@@ -48,7 +49,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="Calendar",
+    name="SymbolicCalendar",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -69,14 +70,14 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="Calendar",
+    name="SymbolicCalendar",
 )
 
 app = BUNDLE(
     coll,
-    name="Calendar.app",
+    name="Symbolic Calendar.app",
     icon="assets/AppIcon.icns",
-    bundle_identifier="com.danielhaden.calendar",
+    bundle_identifier="com.danielhaden.symboliccalendar",
     info_plist={
         "CFBundleName": "Symbolic Calendar",
         "CFBundleDisplayName": "Symbolic Calendar",

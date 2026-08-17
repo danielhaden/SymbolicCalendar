@@ -44,7 +44,8 @@ jobs:
         run: pyinstaller --noconfirm --clean SymbolicCalendar.spec
 
       - name: Smoke test (moon data computes inside the bundle)
-        run: "dist/Symbolic Calendar.app/Contents/MacOS/SymbolicCalendar --selftest"
+        run: |
+          "dist/Symbolic Calendar.app/Contents/MacOS/SymbolicCalendar" --selftest
 
       - name: Package DMG
         run: |

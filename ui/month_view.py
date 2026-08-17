@@ -1590,7 +1590,7 @@ class DayCell(QPushButton):
             p_lo, p_hi = (min(press), max(press)) if press else (0.0, 1.0)
 
         dim = 0.5 if not self._in_month else 1.0
-        _, _, y_top, y_bot = band
+        x0, x1, y_top, y_bot = band
 
         def stroke(segs, width, alpha, dash=None):
             col = QColor(t.TEXT); col.setAlpha(int(alpha * dim))
@@ -1628,6 +1628,20 @@ class DayCell(QPushButton):
         p.setFont(font)
         label(t_end, "T", 205)
         label(p_end, "P", 150)
+        # Small dots at the day's highest and lowest pressure (no text — the
+        # hover scrubber surfaces the values).
+        pvals = [(i, v) for i, v in enumerate(dw.pressure_hpa) if v is not None]
+        n = len(dw.pressure_hpa)
+        if pvals and x1 > x0 and n > 1:
+            rng = (p_hi - p_lo) or 1.0
+            dot = QColor(t.TEXT); dot.setAlpha(int(200 * dim))
+            p.setPen(Qt.NoPen); p.setBrush(dot)
+            for idx in (max(pvals, key=lambda iv: iv[1])[0],
+                        min(pvals, key=lambda iv: iv[1])[0]):
+                x = x0 + idx / (n - 1) * (x1 - x0)
+                frac = max(0.0, min(1.0, (dw.pressure_hpa[idx] - p_lo) / rng))
+                p.drawEllipse(QPointF(x, y_bot - frac * (y_bot - y_top)),
+                              1.7 * s, 1.7 * s)
         p.restore()
 
         if self._weather_hover is not None:

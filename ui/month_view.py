@@ -367,7 +367,7 @@ class DayCell(QPushButton):
         self._show_weather = False
         self._weather: DayWeather | None = None
         self._wx_scale: tuple[float, float, float, float] | None = None
-        self._weather_hover = False    # cursor over the curve band (grid tile)
+        self._weather_hover: QPointF | None = None  # cursor pos over the band
         self._events: list[Occurrence] = []     # this day's resolved occurrences
         # Drag state for moving an event box within the canvas (grid tiles).
         self._drag_index: int | None = None
@@ -1231,7 +1231,7 @@ class DayCell(QPushButton):
         if visible != self._show_weather:
             self._show_weather = visible
             if not visible:
-                self._weather_hover = False
+                self._weather_hover = None
             self.update()
 
     def set_weather(self, weather: DayWeather | None,
@@ -1320,8 +1320,8 @@ class DayCell(QPushButton):
         self._set_bar_hover(False)
         self._set_ingress_hover(None)
         self._set_asc_expanded(False)
-        if self._weather_hover:
-            self._weather_hover = False
+        if self._weather_hover is not None:
+            self._weather_hover = None
         if self._daylight_hover:
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
@@ -1374,12 +1374,15 @@ class DayCell(QPushButton):
                 self.daylight_hover_changed.emit()
             self._set_moon_hover(self._moon_segment_at(pos))
         self._set_ingress_hover(self._ingress_at(pos))
-        # Weather-curve hover reveals the day's temp/pressure readout.
+        # Weather-curve hover: a scrubber follows the cursor along the band.
         band = self._weather_band()
         over_wx = band is not None and QRectF(
             band[0], band[2], band[1] - band[0], band[3] - band[2]).contains(pos)
-        if over_wx != self._weather_hover:
-            self._weather_hover = over_wx
+        if over_wx:
+            self._weather_hover = pos      # repaint so the scrubber tracks
+            self.update()
+        elif self._weather_hover is not None:
+            self._weather_hover = None
             self.update()
         # A vertical-resize cursor over an event box's lower edge (not while the
         # band is open over the canvas).
@@ -1627,37 +1630,70 @@ class DayCell(QPushButton):
         label(p_end, "P", 150)
         p.restore()
 
-        if self._weather_hover:
-            self._draw_weather_readout(p, t, band)
+        if self._weather_hover is not None:
+            self._draw_weather_scrub(p, t, band, (t_lo, t_hi, p_lo, p_hi))
 
-    def _draw_weather_readout(self, p: QPainter, t: Theme,
-                              band: tuple[float, float, float, float]) -> None:
-        """A small chip (grid-tile hover) with the day's temp high/low and its
-        pressure range in inHg."""
-        dw = self._weather
-        parts = []
-        if dw.temp_max is not None and dw.temp_min is not None:
-            parts.append(f"{dw.temp_max:.0f}°/{dw.temp_min:.0f}°")
-        inhg = [v for v in dw.pressure_inhg() if v is not None]
-        if inhg:
-            parts.append(f"{min(inhg):.2f}–{max(inhg):.2f}″")
-        if not parts:
+    def _draw_weather_scrub(self, p: QPainter, t: Theme,
+                            band: tuple[float, float, float, float],
+                            scale: tuple[float, float, float, float]) -> None:
+        """Grid-tile hover scrubber: snap to the hovered hour, pick the curve
+        nearest the cursor, and draw a vertical line from the band base up to it,
+        a dot on the curve, and that point's value."""
+        pos = self._weather_hover
+        if pos is None:
             return
+        x0, x1, y_top, y_bot = band
+        t_lo, t_hi, p_lo, p_hi = scale
+        dw = self._weather
         s = self._paint_scale()
-        text = "  ".join(parts)
+        n = len(dw.temp_f) or 1
+        hx = max(x0, min(x1, pos.x()))
+        i = round((hx - x0) / (x1 - x0) * (n - 1)) if x1 > x0 and n > 1 else 0
+        i = max(0, min(n - 1, i))
+        xi = x0 + (i / (n - 1)) * (x1 - x0) if n > 1 else x0
+
+        def y_of(v, lo, hi):
+            if v is None:
+                return None
+            frac = max(0.0, min(1.0, (v - lo) / ((hi - lo) or 1.0)))
+            return y_bot - frac * (y_bot - y_top)
+
+        inhg = dw.pressure_inhg()
+        tv = dw.temp_f[i]
+        pv_inhg = inhg[i] if i < len(inhg) else None
+        cand = []  # (curve y, value text)
+        ty = y_of(tv, t_lo, t_hi)
+        if ty is not None:
+            cand.append((ty, f"{tv:.0f}°"))
+        py = y_of(dw.pressure_hpa[i], p_lo, p_hi)
+        if py is not None and pv_inhg is not None:
+            cand.append((py, f"{pv_inhg:.2f}″"))
+        if not cand:
+            return
+        cy, text = min(cand, key=lambda c: abs(c[0] - pos.y()))
+
+        dim = 0.5 if not self._in_month else 1.0
+        p.save()
+        line = QColor(t.TEXT); line.setAlpha(int(150 * dim))
+        pen = QPen(line); pen.setWidthF(1.0 * s); p.setPen(pen)
+        p.drawLine(QPointF(xi, y_bot), QPointF(xi, cy))
+        dot = QColor(t.TEXT); dot.setAlpha(int(235 * dim))
+        p.setPen(Qt.NoPen); p.setBrush(dot)
+        p.drawEllipse(QPointF(xi, cy), 2.0 * s, 2.0 * s)
         font = QFont(self.font()); font.setPixelSize(max(1, round(9 * s)))
         p.setFont(font)
         fm = p.fontMetrics()
-        tw = fm.horizontalAdvance(text) + 8 * s
-        th = fm.height() + 3 * s
-        x = max(1.0, min(self.width() - tw - 1.0, band[0] + 2 * s))
-        y = max(1.0, band[2] - th - 2 * s)
-        p.save()
+        tw = fm.horizontalAdvance(text) + 6 * s
+        th = fm.height() + 2 * s
+        tx = max(1.0, min(self.width() - tw - 1.0, xi - tw / 2))
+        ty_box = cy - th - 3 * s
+        if ty_box < 0:
+            ty_box = cy + 3 * s
         bg = QColor(t.BG_1); bg.setAlpha(235)
         p.setPen(Qt.NoPen); p.setBrush(bg)
-        p.drawRoundedRect(QRectF(x, y, tw, th), 2, 2)
+        p.drawRoundedRect(QRectF(tx, ty_box, tw, th), 2, 2)
         p.setPen(QColor(t.TEXT))
-        p.drawText(QRectF(x, y, tw, th), Qt.AlignCenter, text)
+        p.drawText(QRectF(tx, ty_box, tw, th), Qt.AlignCenter, text)
         p.restore()
 
     # -- painting --------------------------------------------------------

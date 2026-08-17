@@ -31,6 +31,7 @@ from .daylight import (
     set_daylight_mode,
 )
 from .ascendant import Ascendant, ascendant
+from .weather import DayWeather, Weather
 
 __all__ = [
     "CalendarModel",
@@ -64,4 +65,6 @@ __all__ = [
     "set_daylight_mode",
     "Ascendant",
     "ascendant",
+    "Weather",
+    "DayWeather",
 ]

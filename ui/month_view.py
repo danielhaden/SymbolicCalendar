@@ -19,6 +19,7 @@ from PySide6.QtCore import (
     QRect,
     QRectF,
     Qt,
+    QThread,
     QTimer,
     QVariantAnimation,
     Signal,
@@ -49,10 +50,12 @@ from model import (
     Ascendant,
     CalendarModel,
     Daylight,
+    DayWeather,
     Events,
     Occurrence,
     Lunation,
     Moonlight,
+    Weather,
     ascendant,
     current_location,
     daylight,
@@ -128,6 +131,13 @@ _MOONBAR_FADE_MS = 180
 # Daylight hover interaction timing.
 _DAYLIGHT_HOVER_DELAY_MS = 250   # wait before the hover UI appears
 _DAYLIGHT_FADE_MS = 180          # fade-in / fade-out duration
+
+# Weather curves: temperature (solid) and pressure (dashed) as intraday lines in
+# a band along the tile's lower body, sharing the 24h x-axis with the time bars.
+_WX_BAND_H = 22.0            # unscaled height of the curve band
+_WX_BAND_GAP = 2.0          # gap above the bottom bar strip
+_WX_TEMP_WIDTH = 1.3        # temperature stroke width
+_WX_PRESS_WIDTH = 1.1       # pressure stroke width
 
 
 def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
@@ -349,6 +359,14 @@ class DayCell(QPushButton):
         self._bar_hover_anim.setDuration(_MOONBAR_FADE_MS)
         self._bar_hover_anim.setEasingCurve(QEasingCurve.InOutQuad)
         self._bar_hover_anim.valueChanged.connect(self._on_bar_hover_anim)
+        # Weather (View menu toggle, off by default): the day's intraday
+        # temperature + pressure curves. Data arrives asynchronously after a
+        # fetch; the shared y-scale spans the whole visible month so day-to-day
+        # curve heights are comparable.
+        self._show_weather = False
+        self._weather: DayWeather | None = None
+        self._wx_scale: tuple[float, float, float, float] | None = None
+        self._weather_hover: QPointF | None = None  # cursor pos over the band
         self._events: list[Occurrence] = []     # this day's resolved occurrences
         # Drag state for moving an event box within the canvas (grid tiles).
         self._drag_index: int | None = None
@@ -1208,6 +1226,37 @@ class DayCell(QPushButton):
             self._show_ascendant = visible
             self.update()
 
+    def set_weather_visible(self, visible: bool) -> None:
+        if visible != self._show_weather:
+            self._show_weather = visible
+            if not visible:
+                self._weather_hover = None
+            self.update()
+
+    def set_weather(self, weather: DayWeather | None,
+                    scale: tuple[float, float, float, float] | None) -> None:
+        """Attach the day's weather and the shared-month y-scale (temp_lo,
+        temp_hi, press_lo, press_hi); repaints if the curves are shown."""
+        self._weather = weather
+        self._wx_scale = scale
+        if self._show_weather:
+            self.update()
+
+    def _weather_band(self) -> tuple[float, float, float, float] | None:
+        """The curve band as (x0, x1, y_top, y_bottom), sitting just above the
+        bottom bar strip / zodiac band, or None when weather can't be drawn."""
+        if self._standalone or not self._show_weather or self._weather is None:
+            return None
+        s = self._paint_scale()
+        x0 = self._bars_width() * s          # clear the left-edge bars (vertical mode)
+        x1 = self.width()
+        y_bot = (self._time_axis_bottom() - self._bars_height() * s
+                 - _WX_BAND_GAP * s)
+        y_top = y_bot - _WX_BAND_H * s
+        if x1 - x0 < 6.0 or y_bot - y_top < 6.0:
+            return None
+        return x0, x1, y_top, y_bot
+
     def set_bars_horizontal(self, horizontal: bool) -> None:
         if horizontal != self._bars_horizontal:
             self._bars_horizontal = horizontal
@@ -1270,6 +1319,8 @@ class DayCell(QPushButton):
         self._set_bar_hover(False)
         self._set_ingress_hover(None)
         self._set_asc_expanded(False)
+        if self._weather_hover is not None:
+            self._weather_hover = None
         if self._daylight_hover:
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
@@ -1322,6 +1373,16 @@ class DayCell(QPushButton):
                 self.daylight_hover_changed.emit()
             self._set_moon_hover(self._moon_segment_at(pos))
         self._set_ingress_hover(self._ingress_at(pos))
+        # Weather-curve hover: a scrubber follows the cursor along the band.
+        band = self._weather_band()
+        over_wx = band is not None and QRectF(
+            band[0], band[2], band[1] - band[0], band[3] - band[2]).contains(pos)
+        if over_wx:
+            self._weather_hover = pos      # repaint so the scrubber tracks
+            self.update()
+        elif self._weather_hover is not None:
+            self._weather_hover = None
+            self.update()
         # A vertical-resize cursor over an event box's lower edge (not while the
         # band is open over the canvas).
         if not asc_open and self._event_resize_at(pos) is not None:
@@ -1487,6 +1548,151 @@ class DayCell(QPushButton):
         left = (bars + 4) if bars else 9
         return QRectF(0, 0, (left + 34) * s, 34 * s)
 
+    def _wx_series_points(self, series, lo: float, hi: float,
+                          band: tuple[float, float, float, float]) -> list[list]:
+        """Split an hourly ``series`` into polyline segments (breaking across
+        missing hours), mapped into the curve ``band`` with the given y-range."""
+        x0, x1, y_top, y_bot = band
+        rng = (hi - lo) or 1.0
+        n = len(series)
+        segs: list[list] = []
+        cur: list = []
+        for i, v in enumerate(series):
+            if v is None:
+                if cur:
+                    segs.append(cur); cur = []
+                continue
+            x = x0 + (i / (n - 1)) * (x1 - x0) if n > 1 else x0
+            frac = max(0.0, min(1.0, (v - lo) / rng))
+            cur.append(QPointF(x, y_bot - frac * (y_bot - y_top)))
+        if cur:
+            segs.append(cur)
+        return segs
+
+    def _draw_weather(self, p: QPainter, t: Theme) -> None:
+        """Temperature (solid) and pressure (dashed) intraday curves in the
+        lower band, with small T / P end labels. Greyscale; dimmed out-of-month.
+        Drawn behind the event glyphs so events stay legible on top."""
+        band = self._weather_band()
+        if band is None:
+            return
+        dw = self._weather
+        s = self._paint_scale()
+        temps = [v for v in dw.temp_f if v is not None]
+        press = [v for v in dw.pressure_hpa if v is not None]
+        if not temps and not press:
+            return
+        if self._wx_scale is not None:
+            t_lo, t_hi, p_lo, p_hi = self._wx_scale
+        else:  # no shared scale yet: autoscale to this day
+            t_lo, t_hi = (min(temps), max(temps)) if temps else (0.0, 1.0)
+            p_lo, p_hi = (min(press), max(press)) if press else (0.0, 1.0)
+
+        dim = 0.5 if not self._in_month else 1.0
+        x0, x1, y_top, y_bot = band
+
+        def stroke(segs, width, alpha, dash=None):
+            col = QColor(t.TEXT); col.setAlpha(int(alpha * dim))
+            pen = QPen(col); pen.setWidthF(width * s); pen.setCapStyle(Qt.RoundCap)
+            if dash:
+                pen.setDashPattern(dash)
+            p.setPen(pen); p.setBrush(Qt.NoBrush)
+            for seg in segs:
+                if len(seg) >= 2:
+                    path = QPainterPath(seg[0])
+                    for pt in seg[1:]:
+                        path.lineTo(pt)
+                    p.drawPath(path)
+
+        p.save()
+        p.setClipRect(QRectF(0.0, y_top - 2.0 * s, self.width(),
+                             y_bot - y_top + 4.0 * s))
+        stroke(self._wx_series_points(dw.temp_f, t_lo, t_hi, band),
+               _WX_TEMP_WIDTH, 205)
+        stroke(self._wx_series_points(dw.pressure_hpa, p_lo, p_hi, band),
+               _WX_PRESS_WIDTH, 140, dash=[2.0, 2.0])
+        # Small dots at the day's highest and lowest pressure (no text — the
+        # hover scrubber surfaces the values).
+        pvals = [(i, v) for i, v in enumerate(dw.pressure_hpa) if v is not None]
+        n = len(dw.pressure_hpa)
+        if pvals and x1 > x0 and n > 1:
+            rng = (p_hi - p_lo) or 1.0
+            dot = QColor(t.TEXT); dot.setAlpha(int(200 * dim))
+            p.setPen(Qt.NoPen); p.setBrush(dot)
+            for idx in (max(pvals, key=lambda iv: iv[1])[0],
+                        min(pvals, key=lambda iv: iv[1])[0]):
+                x = x0 + idx / (n - 1) * (x1 - x0)
+                frac = max(0.0, min(1.0, (dw.pressure_hpa[idx] - p_lo) / rng))
+                p.drawEllipse(QPointF(x, y_bot - frac * (y_bot - y_top)),
+                              1.7 * s, 1.7 * s)
+        p.restore()
+
+        if self._weather_hover is not None:
+            self._draw_weather_scrub(p, t, band, (t_lo, t_hi, p_lo, p_hi))
+
+    def _draw_weather_scrub(self, p: QPainter, t: Theme,
+                            band: tuple[float, float, float, float],
+                            scale: tuple[float, float, float, float]) -> None:
+        """Grid-tile hover scrubber: snap to the hovered hour, pick the curve
+        nearest the cursor, and draw a vertical line from the band base up to it,
+        a dot on the curve, and that point's value."""
+        pos = self._weather_hover
+        if pos is None:
+            return
+        x0, x1, y_top, y_bot = band
+        t_lo, t_hi, p_lo, p_hi = scale
+        dw = self._weather
+        s = self._paint_scale()
+        n = len(dw.temp_f) or 1
+        hx = max(x0, min(x1, pos.x()))
+        i = round((hx - x0) / (x1 - x0) * (n - 1)) if x1 > x0 and n > 1 else 0
+        i = max(0, min(n - 1, i))
+        xi = x0 + (i / (n - 1)) * (x1 - x0) if n > 1 else x0
+
+        def y_of(v, lo, hi):
+            if v is None:
+                return None
+            frac = max(0.0, min(1.0, (v - lo) / ((hi - lo) or 1.0)))
+            return y_bot - frac * (y_bot - y_top)
+
+        inhg = dw.pressure_inhg()
+        tv = dw.temp_f[i]
+        pv_inhg = inhg[i] if i < len(inhg) else None
+        cand = []  # (curve y, value text)
+        ty = y_of(tv, t_lo, t_hi)
+        if ty is not None:
+            cand.append((ty, f"{tv:.0f}°"))
+        py = y_of(dw.pressure_hpa[i], p_lo, p_hi)
+        if py is not None and pv_inhg is not None:
+            cand.append((py, f"{pv_inhg:.2f}″"))
+        if not cand:
+            return
+        cy, text = min(cand, key=lambda c: abs(c[0] - pos.y()))
+
+        dim = 0.5 if not self._in_month else 1.0
+        p.save()
+        line = QColor(t.TEXT); line.setAlpha(int(150 * dim))
+        pen = QPen(line); pen.setWidthF(1.0 * s); p.setPen(pen)
+        p.drawLine(QPointF(xi, y_bot), QPointF(xi, cy))
+        dot = QColor(t.TEXT); dot.setAlpha(int(235 * dim))
+        p.setPen(Qt.NoPen); p.setBrush(dot)
+        p.drawEllipse(QPointF(xi, cy), 2.0 * s, 2.0 * s)
+        font = QFont(self.font()); font.setPixelSize(max(1, round(9 * s)))
+        p.setFont(font)
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(text) + 6 * s
+        th = fm.height() + 2 * s
+        tx = max(1.0, min(self.width() - tw - 1.0, xi - tw / 2))
+        ty_box = cy - th - 3 * s
+        if ty_box < 0:
+            ty_box = cy + 3 * s
+        bg = QColor(t.BG_1); bg.setAlpha(235)
+        p.setPen(Qt.NoPen); p.setBrush(bg)
+        p.drawRoundedRect(QRectF(tx, ty_box, tw, th), 2, 2)
+        p.setPen(QColor(t.TEXT))
+        p.drawText(QRectF(tx, ty_box, tw, th), Qt.AlignCenter, text)
+        p.restore()
+
     # -- painting --------------------------------------------------------
     def paintEvent(self, event) -> None:
         if self._date is None or self._theme is None:
@@ -1564,6 +1770,11 @@ class DayCell(QPushButton):
             self._draw_hatch(p, moon_rect, mcol, _BAR_HATCH_GAP * s,
                              _BAR_HATCH_WIDTH, forward=True)
             self._draw_bar_border(p, moon_rect)
+
+        # --- Weather curves: intraday temperature + pressure in the lower band,
+        # under the event glyphs (drawn next) so events read on top. ---
+        if self._show_weather:
+            self._draw_weather(p, t)
 
         # --- Event canvas: a box in the tile body holding one glyph per event.
         # Grid tiles are borderless; the expanded tile shows the day's events in
@@ -1698,15 +1909,45 @@ class DayCell(QPushButton):
         p.end()
 
 
+class _WeatherWorker(QThread):
+    """Fetches a date range's weather off the UI thread. It uses its own Weather
+    instance against the shared file (never touching the UI's cache in memory),
+    so the only cross-thread hand-off is the file plus the ``done`` signal."""
+
+    done = Signal()
+
+    def __init__(self, path, location, start, end, parent=None) -> None:
+        super().__init__(parent)
+        self._path = path
+        self._location = location
+        self._start = start
+        self._end = end
+
+    def run(self) -> None:
+        try:
+            Weather(self._path).ensure_range(
+                self._start, self._end, self._location)
+        except Exception:
+            pass
+        self.done.emit()
+
+
 class MonthView(QWidget):
     """The left-hand month calendar."""
 
     def __init__(self, model: CalendarModel, theme: ThemeManager,
-                 events: Events | None = None) -> None:
+                 events: Events | None = None,
+                 weather: Weather | None = None) -> None:
         super().__init__()
         self._model = model
         self._theme = theme
         self._events = events or Events()
+        # Weather (View menu toggle, off by default): fetched off-thread for the
+        # visible month and cached; None until main_window supplies a store.
+        self._weather = weather
+        self._show_weather = False
+        self._wx_worker: _WeatherWorker | None = None
+        self._wx_range: tuple[date, date] | None = None
         # Planet ingresses / retrograde stations to mark (all on by default;
         # toggled via the View menu).
         self._enabled_planets: set[str] = {key for key, _, _ in PLANETS}
@@ -2248,6 +2489,76 @@ class MonthView(QWidget):
             c.set_ascendant_visible(visible)
         self._expanded.set_ascendant_visible(visible)
 
+    # -- weather ---------------------------------------------------------
+    def set_weather_visible(self, visible: bool) -> None:
+        """Show/hide the temperature + pressure curves (View menu). Turning it on
+        applies whatever's cached immediately, then fetches the visible month's
+        missing days off-thread."""
+        self._show_weather = visible
+        for c in self._cells:
+            c.set_weather_visible(visible)
+        if visible:
+            self._apply_weather()
+            self._fetch_weather()
+
+    def _visible_dates(self) -> tuple[date, date] | None:
+        days = [c._date for c in self._cells if c._date is not None]
+        return (min(days), max(days)) if days else None
+
+    def _weather_scale(self, days) -> tuple[float, float, float, float] | None:
+        """A shared y-scale (temp_lo, temp_hi, press_lo, press_hi) across the
+        visible month, padded, so day-to-day curve heights are comparable."""
+        temps: list[float] = []
+        press: list[float] = []
+        for dw in days:
+            temps += [v for v in dw.temp_f if v is not None]
+            press += [v for v in dw.pressure_hpa if v is not None]
+        if not temps or not press:
+            return None
+        tpad = max(1.0, (max(temps) - min(temps)) * 0.08)
+        ppad = max(0.5, (max(press) - min(press)) * 0.08)
+        return (min(temps) - tpad, max(temps) + tpad,
+                min(press) - ppad, max(press) + ppad)
+
+    def _apply_weather(self) -> None:
+        """Push cached weather (and the shared scale) onto each cell."""
+        if self._weather is None:
+            return
+        rng = self._visible_dates()
+        if rng is None:
+            return
+        data = self._weather.range(rng[0], rng[1])
+        scale = self._weather_scale(data.values())
+        for c in self._cells:
+            c.set_weather(data.get(c._date) if c._date else None, scale)
+
+    def _fetch_weather(self) -> None:
+        """Fetch the visible month's missing/stale weather on a worker thread."""
+        if self._weather is None or not self._show_weather:
+            return
+        if self._wx_worker is not None and self._wx_worker.isRunning():
+            return  # a fetch is already in flight; it will re-apply on finish
+        rng = self._visible_dates()
+        if rng is None:
+            return
+        path = self._weather.folder() / "weather.json"
+        self._wx_range = rng
+        self._wx_worker = _WeatherWorker(
+            path, current_location(), rng[0], rng[1], self)
+        self._wx_worker.done.connect(self._on_weather_fetched)
+        self._wx_worker.start()
+
+    def _on_weather_fetched(self) -> None:
+        self._wx_worker = None
+        if self._weather is None:
+            return
+        self._weather.reload()   # pick up what the worker wrote
+        self._apply_weather()
+        # If the month (or location) changed while the fetch was in flight, catch
+        # the new range up. Only when it differs, so this can't loop.
+        if self._show_weather and self._visible_dates() != self._wx_range:
+            self._fetch_weather()
+
     def set_bars_horizontal(self, horizontal: bool) -> None:
         """Lay the daylight/moon time bars along the bottom edge (24h left->
         right) instead of the left edge; a persisted Settings preference."""
@@ -2416,3 +2727,10 @@ class MonthView(QWidget):
                                     first_col=(col == 0))
             else:
                 cell.setVisible(False)
+
+        # Weather (when shown): apply what's cached for the new month, then fetch
+        # any missing days off-thread. Runs after the grid is configured so the
+        # visible-date range is known.
+        if self._show_weather:
+            self._apply_weather()
+            self._fetch_weather()

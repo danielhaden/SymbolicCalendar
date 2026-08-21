@@ -210,6 +210,16 @@ class MainWindow(QMainWindow):
         self._show_weather = self._settings.value(
             "view/show_weather", False, type=bool)
         self._month_view.set_weather_visible(self._show_weather)
+        # Faint 08:00/16:00 vertical guide lines: a persisted preference, on by
+        # default.
+        self._show_gridlines = self._settings.value(
+            "view/show_gridlines", True, type=bool)
+        self._month_view.set_gridlines_visible(self._show_gridlines)
+        # Locked tile aspect ratio (width:height = sqrt(3):1): persisted, off by
+        # default.
+        self._lock_aspect = self._settings.value(
+            "view/lock_aspect", False, type=bool)
+        self._month_view.set_aspect_locked(self._lock_aspect)
         # Central column: an (initially hidden) update banner over the month view.
         self._update_banner = _UpdateBanner(self._theme)
         central = QWidget()
@@ -315,6 +325,16 @@ class MainWindow(QMainWindow):
         self._settings.setValue("view/show_weather", visible)
         self._month_view.set_weather_visible(visible)
 
+    def _on_toggle_gridlines(self, visible: bool) -> None:
+        self._show_gridlines = visible
+        self._settings.setValue("view/show_gridlines", visible)
+        self._month_view.set_gridlines_visible(visible)
+
+    def _on_toggle_aspect(self, locked: bool) -> None:
+        self._lock_aspect = locked
+        self._settings.setValue("view/lock_aspect", locked)
+        self._month_view.set_aspect_locked(locked)
+
     def _on_set_daylight_mode(self, mode: str) -> None:
         self._daylight_mode = mode
         self._settings.setValue("view/daylight_mode", mode)
@@ -384,6 +404,16 @@ class MainWindow(QMainWindow):
         weather_action.setCheckable(True)
         weather_action.setChecked(self._show_weather)  # persisted; off by default
         weather_action.toggled.connect(self._on_toggle_weather)
+
+        gridlines_action = view_menu.addAction("Show Time Gridlines")
+        gridlines_action.setCheckable(True)
+        gridlines_action.setChecked(self._show_gridlines)  # persisted; on by default
+        gridlines_action.toggled.connect(self._on_toggle_gridlines)
+
+        aspect_action = view_menu.addAction("Lock Tile Aspect Ratio")
+        aspect_action.setCheckable(True)
+        aspect_action.setChecked(self._lock_aspect)  # persisted; off by default
+        aspect_action.toggled.connect(self._on_toggle_aspect)
 
         ingress_menu = view_menu.addMenu("Planet Ingresses")
         for key, name, _glyph in PLANETS:

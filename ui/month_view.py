@@ -293,6 +293,7 @@ class DayCell(QPushButton):
         self._hover_progress = 0.0     # fade amount for the overlay
         self._show_daylight = True     # View menu toggle
         self._show_moon_glyph = True   # top-right moon-phase glyph (View menu)
+        self._show_gridlines = False   # faint 08:00/16:00 verticals (View menu)
         # Standalone (expanded) tile: an enlarged copy of a grid tile that fills
         # the month view; its day number collapses it back.
         self._standalone = False
@@ -1230,6 +1231,11 @@ class DayCell(QPushButton):
             self._show_ascendant = visible
             self.update()
 
+    def set_gridlines_visible(self, visible: bool) -> None:
+        if visible != self._show_gridlines:
+            self._show_gridlines = visible
+            self.update()
+
     def set_weather_visible(self, visible: bool) -> None:
         if visible != self._show_weather:
             self._show_weather = visible
@@ -1519,6 +1525,7 @@ class DayCell(QPushButton):
         self._daylight = other._daylight
         self._show_daylight = other._show_daylight
         self._show_moon_glyph = other._show_moon_glyph
+        self._show_gridlines = other._show_gridlines
         self._moonlight = other._moonlight
         self._show_moon_bar = other._show_moon_bar
         self._ascendant = other._ascendant
@@ -1761,6 +1768,21 @@ class DayCell(QPushButton):
             if self._draw_right:
                 p.drawLine(QPointF(w - 0.5, 0), QPointF(w - 0.5, h))  # outer right
 
+            # --- Faint 08:00 / 16:00 guide lines: two verticals dividing the
+            # tile into thirds. The tile's width is the 24h axis, so 1/3 = 08:00
+            # and 2/3 = 16:00; drawn first, as a subtle time reference behind
+            # everything else, and aligned down each weekday column. ---
+            if self._show_gridlines:
+                gl = QColor(t.TILE_LINE)
+                gl.setAlpha(55 if not self._in_month else 110)
+                gpen = QPen(gl)
+                gpen.setWidthF(1.0)
+                gpen.setCosmetic(True)
+                p.setPen(gpen)
+                for frac in (1.0 / 3.0, 2.0 / 3.0):
+                    x = round(w * frac) + 0.5
+                    p.drawLine(QPointF(x, 0), QPointF(x, h))
+
         # --- Daylight bar: civil dawn..dusk on the tile's 24h axis, filled with
         # a backslash '\' hatch — perpendicular to the moon bar's '/' so the two
         # read apart by direction. The hovered bar blends to black. ---
@@ -1997,8 +2019,18 @@ class MonthView(QWidget):
         root.setSpacing(14)
 
         root.addLayout(self._build_header())
-        root.addLayout(self._build_weekday_row())
-        root.addLayout(self._build_grid(), stretch=1)
+        # Weekday row + grid live in one container so a single margin can
+        # letterbox and centre them together (aspect-lock) while keeping the
+        # weekday labels aligned with the grid columns.
+        self._cal = QWidget()
+        self._cal_layout = QVBoxLayout(self._cal)
+        self._cal_layout.setContentsMargins(0, 0, 0, 0)
+        self._cal_layout.setSpacing(8)
+        self._cal_layout.addLayout(self._build_weekday_row())
+        self._cal_layout.addLayout(self._build_grid(), stretch=1)
+        root.addWidget(self._cal, stretch=1)
+        # Optional locked tile aspect ratio (View menu): width:height = sqrt(3):1.
+        self._lock_aspect = False
 
         # Daylight-hover orchestration: a delay timer before the overlay
         # appears, and a fade animation driving the cells' hover progress.
@@ -2161,6 +2193,7 @@ class MonthView(QWidget):
             self._expanded.update()
 
     def resizeEvent(self, event) -> None:
+        self._apply_aspect_lock()
         # Keep a fully-expanded overlay matching the view as the window resizes.
         if self._expanded.isVisible() and not self._collapsing \
                 and self._expand_anim.state() != QPropertyAnimation.Running:
@@ -2171,6 +2204,29 @@ class MonthView(QWidget):
         if self._event_editing is not None and not self._position_event_edit():
             self._commit_event_text()
         super().resizeEvent(event)
+
+    def _apply_aspect_lock(self) -> None:
+        """When locked, letterbox the 7x6 grid so every tile is width:height =
+        sqrt(3):1, centred in the available area (margins on the calendar
+        container also inset the weekday row, keeping it column-aligned). When
+        unlocked, the grid fills the area as before."""
+        m = self._cal_layout
+        if not self._lock_aspect:
+            m.setContentsMargins(0, 0, 0, 0)
+            return
+        sqrt3 = 3.0 ** 0.5
+        avail_w = self._cal.width()
+        wr_h = (self._weekday_labels[0].sizeHint().height()
+                if self._weekday_labels else 0)
+        grid_avail_h = self._cal.height() - wr_h - m.spacing()
+        if avail_w <= 0 or grid_avail_h <= 0:
+            return
+        tile_h = min(grid_avail_h / 6.0, (avail_w / 7.0) / sqrt3)
+        grid_w = 7.0 * sqrt3 * tile_h
+        grid_h = 6.0 * tile_h
+        lr = max(0, int((avail_w - grid_w) / 2))
+        tb = max(0, int((grid_avail_h - grid_h) / 2))
+        m.setContentsMargins(lr, tb, lr, tb)
 
     # -- construction ----------------------------------------------------
     def _build_header(self) -> QHBoxLayout:
@@ -2527,6 +2583,16 @@ class MonthView(QWidget):
         for c in self._cells:
             c.set_ascendant_visible(visible)
         self._expanded.set_ascendant_visible(visible)
+
+    def set_gridlines_visible(self, visible: bool) -> None:
+        """Show/hide the faint 08:00/16:00 vertical guide lines (View menu)."""
+        for c in self._cells:
+            c.set_gridlines_visible(visible)
+
+    def set_aspect_locked(self, locked: bool) -> None:
+        """Lock every tile to width:height = sqrt(3):1 (View menu), or fill."""
+        self._lock_aspect = locked
+        self._apply_aspect_lock()
 
     # -- weather ---------------------------------------------------------
     def set_weather_visible(self, visible: bool) -> None:

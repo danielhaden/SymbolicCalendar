@@ -8,6 +8,9 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Qt,
+    QEasingCurve,
+    QPropertyAnimation,
+    QRect,
     QSettings,
     QStandardPaths,
     QThread,
@@ -15,7 +18,13 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDesktopServices,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -39,6 +48,7 @@ from model import (
 from model.updates import Release, check_for_update
 from .theme import ThemeManager
 from .month_view import MonthView, PLANETS
+from .chat_drawer import ChatDrawer
 from .settings_dialog import (
     BAR_THICKNESS_MAX,
     BAR_THICKNESS_MIN,
@@ -222,13 +232,31 @@ class MainWindow(QMainWindow):
         self._month_view.set_aspect_locked(self._lock_aspect)
         # Central column: an (initially hidden) update banner over the month view.
         self._update_banner = _UpdateBanner(self._theme)
-        central = QWidget()
-        column = QVBoxLayout(central)
+        self._central = QWidget()
+        column = QVBoxLayout(self._central)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
         column.addWidget(self._update_banner)
         column.addWidget(_Panel(self._month_view, self._theme))
-        self.setCentralWidget(central)
+        self.setCentralWidget(self._central)
+
+        # Agent chat: a panel that slides in from the right, overlaying the
+        # month view. Parked off-screen until the hamburger opens it.
+        self._drawer = ChatDrawer(self._theme, self._central)
+        self._drawer.close_requested.connect(self._close_drawer)
+        self._month_view.agents_requested.connect(self._toggle_drawer)
+        self._drawer.hide()
+        self._drawer_open = False
+        self._drawer_anim = QPropertyAnimation(self._drawer, b"geometry", self)
+        self._drawer_anim.setDuration(220)
+        self._drawer_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._drawer_anim.finished.connect(self._on_drawer_anim_finished)
+        # Cmd+/ toggles the drawer anywhere; Esc closes it while it has focus.
+        self._drawer_toggle_sc = QShortcut(QKeySequence("Ctrl+/"), self)
+        self._drawer_toggle_sc.activated.connect(self._toggle_drawer)
+        self._drawer_esc_sc = QShortcut(QKeySequence(Qt.Key_Escape), self._drawer)
+        self._drawer_esc_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        self._drawer_esc_sc.activated.connect(self._close_drawer)
 
         self._build_menu_bar()
 
@@ -257,6 +285,53 @@ class MainWindow(QMainWindow):
         self._build_view_menu()
         self._build_settings_menu()
         self._build_themes_menu()
+
+    # -- agent chat drawer -----------------------------------------------
+    def _drawer_width(self) -> int:
+        """Drawer width: a comfortable panel, capped on narrow windows."""
+        return min(380, max(280, int(self._central.width() * 0.42)))
+
+    def _drawer_rect(self, opened: bool) -> QRect:
+        w = self._drawer_width()
+        h = self._central.height()
+        x = self._central.width() - (w if opened else 0)
+        return QRect(x, 0, w, h)
+
+    def _toggle_drawer(self) -> None:
+        self._close_drawer() if self._drawer_open else self._open_drawer()
+
+    def _open_drawer(self) -> None:
+        if self._drawer_open:
+            return
+        self._drawer_open = True
+        self._drawer.setGeometry(self._drawer_rect(opened=False))  # start off-screen
+        self._drawer.show()
+        self._drawer.raise_()
+        self._drawer_anim.stop()
+        self._drawer_anim.setStartValue(self._drawer.geometry())
+        self._drawer_anim.setEndValue(self._drawer_rect(opened=True))
+        self._drawer_anim.start()
+        self._drawer.focus_input()
+
+    def _close_drawer(self) -> None:
+        if not self._drawer_open:
+            return
+        self._drawer_open = False
+        self._drawer_anim.stop()
+        self._drawer_anim.setStartValue(self._drawer.geometry())
+        self._drawer_anim.setEndValue(self._drawer_rect(opened=False))
+        self._drawer_anim.start()
+
+    def _on_drawer_anim_finished(self) -> None:
+        if not self._drawer_open:
+            self._drawer.hide()  # fully closed: drop it out of the way
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Keep the drawer anchored to the right edge / full height on resize
+        # (unless it's mid-slide, which drives its own geometry).
+        if self._drawer_anim.state() != QPropertyAnimation.Running:
+            self._drawer.setGeometry(self._drawer_rect(opened=self._drawer_open))
 
     def _build_settings_menu(self) -> None:
         settings_menu = self.menuBar().addMenu("Settings")

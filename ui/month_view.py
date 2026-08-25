@@ -1990,6 +1990,9 @@ class _WeatherWorker(QThread):
 class MonthView(QWidget):
     """The left-hand month calendar."""
 
+    # Emitted when the header's Agents (☰) button is clicked.
+    agents_requested = Signal()
+
     def __init__(self, model: CalendarModel, theme: ThemeManager,
                  events: Events | None = None,
                  weather: Weather | None = None) -> None:
@@ -2246,6 +2249,16 @@ class MonthView(QWidget):
         self._today_btn.setFocusPolicy(Qt.NoFocus)
         self._today_btn.clicked.connect(self._model.go_to_today)
 
+        # Opens the agent chat drawer (the main window wires it up). Placed in
+        # the header so it's visible in-window — a menu-bar corner widget isn't
+        # rendered under macOS's native global menu bar.
+        self._agents_btn = QPushButton("☰")
+        self._agents_btn.setFixedSize(32, 32)
+        self._agents_btn.setCursor(Qt.PointingHandCursor)
+        self._agents_btn.setFocusPolicy(Qt.NoFocus)
+        self._agents_btn.setToolTip("Agents  (⌘/)")
+        self._agents_btn.clicked.connect(self.agents_requested)
+
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(self._title)
@@ -2253,6 +2266,7 @@ class MonthView(QWidget):
         row.addWidget(self._today_btn)
         row.addWidget(self._prev_btn)
         row.addWidget(self._next_btn)
+        row.addWidget(self._agents_btn)
         return row
 
     def _build_weekday_row(self) -> QHBoxLayout:

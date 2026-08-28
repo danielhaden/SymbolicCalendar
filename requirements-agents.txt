@@ -1,0 +1,14 @@
+# Optional: local agent support (the ☰ Agents drawer).
+#
+# The app runs fine without these — model/agents imports LangGraph lazily, so the
+# feature simply reports "unavailable" until they're installed. They're kept out
+# of the base requirements so the packaged build isn't burdened with them.
+#
+#   pip install -r requirements-agents.txt
+#
+# Also requires Ollama running locally (https://ollama.com) with a tool-calling
+# model pulled — e.g. `ollama pull qwen2.5` (a 7B+ model is recommended; the 3B
+# llama3.2 can call tools but is unreliable at multi-step reasoning).
+
+langgraph>=0.6
+langchain-ollama>=0.3

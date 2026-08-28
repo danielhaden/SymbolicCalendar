@@ -33,11 +33,6 @@ _SUGGESTIONS = (
     "Which weekend looks best for an outdoor event?",
 )
 
-_PLACEHOLDER_REPLY = (
-    "I'm not connected to any agents yet — this is where astrology and "
-    "weather answers will appear once they're wired up."
-)
-
 # Selectable agents. "Auto" routes to whichever fits; the others target one.
 _AGENTS = ("Auto", "Astrology", "Weather")
 
@@ -59,6 +54,16 @@ class _Bubble(QFrame):
         lay.addWidget(self._label)
         self.apply_theme()
 
+    def append(self, text: str) -> None:
+        """Grow the bubble as streamed text arrives."""
+        self._label.setText(self._label.text() + text)
+
+    def text(self) -> str:
+        return self._label.text()
+
+    def set_text(self, text: str) -> None:
+        self._label.setText(text)
+
     def apply_theme(self) -> None:
         t = self._theme.current
         if self._from_user:
@@ -77,6 +82,9 @@ class ChatDrawer(QWidget):
     parent window; this widget owns the conversation and input."""
 
     close_requested = Signal()
+    # Emitted when the user submits a message; the window drives the agent and
+    # streams the reply back via begin/append/end_agent_message.
+    message_submitted = Signal(str)
 
     def __init__(self, theme: ThemeManager, parent=None) -> None:
         super().__init__(parent)
@@ -84,6 +92,8 @@ class ChatDrawer(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self._theme = theme
         self._bubbles: list[_Bubble] = []
+        self._streaming: _Bubble | None = None   # the agent bubble being filled
+        self._busy = False                        # a reply is in flight
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -216,14 +226,13 @@ class ChatDrawer(QWidget):
 
     def _send(self) -> None:
         text = self._input.text().strip()
-        if not text:
+        if not text or self._busy:
             return
         self._input.clear()
         if self._intro is not None:
             self._intro.hide()  # tuck the suggestions away once a chat begins
         self.add_user_message(text)
-        # Stub: the real agent call lands here later.
-        self.add_agent_message(_PLACEHOLDER_REPLY)
+        self.message_submitted.emit(text)
 
     def add_user_message(self, text: str) -> None:
         self._add_bubble(text, from_user=True)
@@ -231,7 +240,36 @@ class ChatDrawer(QWidget):
     def add_agent_message(self, text: str) -> None:
         self._add_bubble(text, from_user=False)
 
-    def _add_bubble(self, text: str, from_user: bool) -> None:
+    def add_notice(self, text: str) -> None:
+        """A muted, centered system line (e.g. 'Ollama isn't running')."""
+        label = QLabel(text)
+        label.setObjectName("drawerNotice")
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet(
+            f"color: {self._theme.current.TEXT_MUTED}; font-size: 11px;")
+        self._msgs.addWidget(label)
+
+    # -- streaming a reply into a single agent bubble --------------------
+    def append_agent_chunk(self, text: str) -> None:
+        # The bubble is created on the first chunk, so a reply that fails before
+        # producing any text leaves no empty bubble behind.
+        if self._streaming is None:
+            self._streaming = self._add_bubble("", from_user=False)
+        self._streaming.append(text)
+
+    def end_agent_message(self) -> None:
+        self._streaming = None
+
+    def set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self._input.setEnabled(not busy)
+        self._send_btn.setEnabled(not busy)
+        self._send_btn.setText("…" if busy else "Send")
+        for chip in self._chips:
+            chip.setEnabled(not busy)
+
+    def _add_bubble(self, text: str, from_user: bool) -> "_Bubble":
         bubble = _Bubble(text, from_user, self._theme)
         self._bubbles.append(bubble)
         wrap = QHBoxLayout()
@@ -245,6 +283,7 @@ class ChatDrawer(QWidget):
             wrap.addWidget(bubble)
             wrap.addStretch(1)
         self._msgs.addWidget(holder)
+        return bubble
 
     def focus_input(self) -> None:
         self._input.setFocus()

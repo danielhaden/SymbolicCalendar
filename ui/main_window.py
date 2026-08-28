@@ -90,6 +90,54 @@ class _UpdateWorker(QThread):
         self.found.emit(release)
 
 
+class _AgentWorker(QThread):
+    """Runs a local LangGraph/Ollama agent off the UI thread, streaming the
+    reply text back in chunks. Emits a friendly ``failed`` message when the deps
+    or Ollama aren't available, so the drawer can guide the user."""
+
+    chunk = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, kind: str, message: str, data_folder: Path,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._kind = kind
+        self._message = message
+        self._data_folder = data_folder
+
+    def run(self) -> None:
+        try:
+            from model.agents import (
+                DEFAULT_MODEL,
+                AgentContext,
+                build_agent,
+                ollama_status,
+                stream_reply,
+            )
+        except Exception:
+            self.failed.emit(
+                "Agent support isn't installed. In a terminal:\n"
+                "pip install -r requirements-agents.txt")
+            return
+        status = ollama_status(DEFAULT_MODEL)
+        if not status.running:
+            self.failed.emit(
+                "Ollama isn't running. Start it (run `ollama serve`, or open the "
+                "Ollama app) and try again.")
+            return
+        if not status.has_model:
+            self.failed.emit(
+                f"The model '{DEFAULT_MODEL}' isn't pulled. In a terminal:\n"
+                f"ollama pull {DEFAULT_MODEL}")
+            return
+        try:
+            agent = build_agent(self._kind, AgentContext(self._data_folder))
+            for piece in stream_reply(agent, self._message):
+                self.chunk.emit(piece)
+        except Exception as exc:  # noqa: BLE001 - surface any runtime failure
+            self.failed.emit(f"The agent hit an error: {exc}")
+
+
 class _UpdateBanner(QFrame):
     """A slim, dismissible bar shown when a newer release is available."""
 
@@ -244,8 +292,10 @@ class MainWindow(QMainWindow):
         # month view. Parked off-screen until the hamburger opens it.
         self._drawer = ChatDrawer(self._theme, self._central)
         self._drawer.close_requested.connect(self._close_drawer)
+        self._drawer.message_submitted.connect(self._on_agent_message)
         self._month_view.agents_requested.connect(self._toggle_drawer)
         self._drawer.hide()
+        self._agent_worker: _AgentWorker | None = None
         self._drawer_open = False
         self._drawer_anim = QPropertyAnimation(self._drawer, b"geometry", self)
         self._drawer_anim.setDuration(220)
@@ -325,6 +375,28 @@ class MainWindow(QMainWindow):
     def _on_drawer_anim_finished(self) -> None:
         if not self._drawer_open:
             self._drawer.hide()  # fully closed: drop it out of the way
+
+    def _on_agent_message(self, text: str) -> None:
+        """Run the selected agent for the submitted message, streaming its reply
+        into the drawer. One at a time — ignore input while a reply is running."""
+        if self._agent_worker is not None and self._agent_worker.isRunning():
+            return
+        self._drawer.set_busy(True)
+        self._agent_worker = _AgentWorker(
+            self._drawer.current_agent(), text, self._events.folder(), self)
+        self._agent_worker.chunk.connect(self._drawer.append_agent_chunk)
+        self._agent_worker.failed.connect(self._on_agent_failed)
+        self._agent_worker.finished.connect(self._on_agent_done)
+        self._agent_worker.start()
+
+    def _on_agent_failed(self, message: str) -> None:
+        self._drawer.add_notice(message)
+
+    def _on_agent_done(self) -> None:
+        self._drawer.end_agent_message()
+        self._drawer.set_busy(False)
+        self._drawer.focus_input()
+        self._agent_worker = None
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

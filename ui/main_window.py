@@ -8,6 +8,9 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Qt,
+    QEasingCurve,
+    QPropertyAnimation,
+    QRect,
     QSettings,
     QStandardPaths,
     QThread,
@@ -15,7 +18,13 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDesktopServices,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -39,6 +48,7 @@ from model import (
 from model.updates import Release, check_for_update
 from .theme import ThemeManager
 from .month_view import MonthView, PLANETS
+from .chat_drawer import ChatDrawer
 from .settings_dialog import (
     BAR_THICKNESS_MAX,
     BAR_THICKNESS_MIN,
@@ -78,6 +88,54 @@ class _UpdateWorker(QThread):
         except Exception:
             release = None
         self.found.emit(release)
+
+
+class _AgentWorker(QThread):
+    """Runs a local LangGraph/Ollama agent off the UI thread, streaming the
+    reply text back in chunks. Emits a friendly ``failed`` message when the deps
+    or Ollama aren't available, so the drawer can guide the user."""
+
+    chunk = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, kind: str, message: str, data_folder: Path,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._kind = kind
+        self._message = message
+        self._data_folder = data_folder
+
+    def run(self) -> None:
+        try:
+            from model.agents import (
+                DEFAULT_MODEL,
+                AgentContext,
+                build_agent,
+                ollama_status,
+                stream_reply,
+            )
+        except Exception:
+            self.failed.emit(
+                "Agent support isn't installed. In a terminal:\n"
+                "pip install -r requirements-agents.txt")
+            return
+        status = ollama_status(DEFAULT_MODEL)
+        if not status.running:
+            self.failed.emit(
+                "Ollama isn't running. Start it (run `ollama serve`, or open the "
+                "Ollama app) and try again.")
+            return
+        if not status.has_model:
+            self.failed.emit(
+                f"The model '{DEFAULT_MODEL}' isn't pulled. In a terminal:\n"
+                f"ollama pull {DEFAULT_MODEL}")
+            return
+        try:
+            agent = build_agent(self._kind, AgentContext(self._data_folder))
+            for piece in stream_reply(agent, self._message):
+                self.chunk.emit(piece)
+        except Exception as exc:  # noqa: BLE001 - surface any runtime failure
+            self.failed.emit(f"The agent hit an error: {exc}")
 
 
 class _UpdateBanner(QFrame):
@@ -222,13 +280,33 @@ class MainWindow(QMainWindow):
         self._month_view.set_aspect_locked(self._lock_aspect)
         # Central column: an (initially hidden) update banner over the month view.
         self._update_banner = _UpdateBanner(self._theme)
-        central = QWidget()
-        column = QVBoxLayout(central)
+        self._central = QWidget()
+        column = QVBoxLayout(self._central)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
         column.addWidget(self._update_banner)
         column.addWidget(_Panel(self._month_view, self._theme))
-        self.setCentralWidget(central)
+        self.setCentralWidget(self._central)
+
+        # Agent chat: a panel that slides in from the right, overlaying the
+        # month view. Parked off-screen until the hamburger opens it.
+        self._drawer = ChatDrawer(self._theme, self._central)
+        self._drawer.close_requested.connect(self._close_drawer)
+        self._drawer.message_submitted.connect(self._on_agent_message)
+        self._month_view.agents_requested.connect(self._toggle_drawer)
+        self._drawer.hide()
+        self._agent_worker: _AgentWorker | None = None
+        self._drawer_open = False
+        self._drawer_anim = QPropertyAnimation(self._drawer, b"geometry", self)
+        self._drawer_anim.setDuration(220)
+        self._drawer_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._drawer_anim.finished.connect(self._on_drawer_anim_finished)
+        # Cmd+/ toggles the drawer anywhere; Esc closes it while it has focus.
+        self._drawer_toggle_sc = QShortcut(QKeySequence("Ctrl+/"), self)
+        self._drawer_toggle_sc.activated.connect(self._toggle_drawer)
+        self._drawer_esc_sc = QShortcut(QKeySequence(Qt.Key_Escape), self._drawer)
+        self._drawer_esc_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        self._drawer_esc_sc.activated.connect(self._close_drawer)
 
         self._build_menu_bar()
 
@@ -257,6 +335,75 @@ class MainWindow(QMainWindow):
         self._build_view_menu()
         self._build_settings_menu()
         self._build_themes_menu()
+
+    # -- agent chat drawer -----------------------------------------------
+    def _drawer_width(self) -> int:
+        """Drawer width: a comfortable panel, capped on narrow windows."""
+        return min(380, max(280, int(self._central.width() * 0.42)))
+
+    def _drawer_rect(self, opened: bool) -> QRect:
+        w = self._drawer_width()
+        h = self._central.height()
+        x = self._central.width() - (w if opened else 0)
+        return QRect(x, 0, w, h)
+
+    def _toggle_drawer(self) -> None:
+        self._close_drawer() if self._drawer_open else self._open_drawer()
+
+    def _open_drawer(self) -> None:
+        if self._drawer_open:
+            return
+        self._drawer_open = True
+        self._drawer.setGeometry(self._drawer_rect(opened=False))  # start off-screen
+        self._drawer.show()
+        self._drawer.raise_()
+        self._drawer_anim.stop()
+        self._drawer_anim.setStartValue(self._drawer.geometry())
+        self._drawer_anim.setEndValue(self._drawer_rect(opened=True))
+        self._drawer_anim.start()
+        self._drawer.focus_input()
+
+    def _close_drawer(self) -> None:
+        if not self._drawer_open:
+            return
+        self._drawer_open = False
+        self._drawer_anim.stop()
+        self._drawer_anim.setStartValue(self._drawer.geometry())
+        self._drawer_anim.setEndValue(self._drawer_rect(opened=False))
+        self._drawer_anim.start()
+
+    def _on_drawer_anim_finished(self) -> None:
+        if not self._drawer_open:
+            self._drawer.hide()  # fully closed: drop it out of the way
+
+    def _on_agent_message(self, text: str) -> None:
+        """Run the selected agent for the submitted message, streaming its reply
+        into the drawer. One at a time — ignore input while a reply is running."""
+        if self._agent_worker is not None and self._agent_worker.isRunning():
+            return
+        self._drawer.set_busy(True)
+        self._agent_worker = _AgentWorker(
+            self._drawer.current_agent(), text, self._events.folder(), self)
+        self._agent_worker.chunk.connect(self._drawer.append_agent_chunk)
+        self._agent_worker.failed.connect(self._on_agent_failed)
+        self._agent_worker.finished.connect(self._on_agent_done)
+        self._agent_worker.start()
+
+    def _on_agent_failed(self, message: str) -> None:
+        self._drawer.add_notice(message)
+
+    def _on_agent_done(self) -> None:
+        self._drawer.end_agent_message()
+        self._drawer.set_busy(False)
+        self._drawer.focus_input()
+        self._agent_worker = None
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Keep the drawer anchored to the right edge / full height on resize
+        # (unless it's mid-slide, which drives its own geometry).
+        if self._drawer_anim.state() != QPropertyAnimation.Running:
+            self._drawer.setGeometry(self._drawer_rect(opened=self._drawer_open))
 
     def _build_settings_menu(self) -> None:
         settings_menu = self.menuBar().addMenu("Settings")

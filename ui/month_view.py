@@ -271,6 +271,11 @@ class DayCell(QPushButton):
     tile_pressed = Signal()
     # Emitted (standalone/expanded tile only) when the day number is clicked.
     collapse_requested = Signal()
+    # Emitted on a wheel event over a grid tile: +1 scroll up (zoom in),
+    # -1 scroll down (zoom out).
+    scrolled = Signal(int)
+    # Emitted when the cursor leaves a grid tile (used to collapse the zoom).
+    left = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -297,6 +302,11 @@ class DayCell(QPushButton):
         # Standalone (expanded) tile: an enlarged copy of a grid tile that fills
         # the month view; its day number collapses it back.
         self._standalone = False
+        # Zoom overlay: a floating copy magnified over a 2x2 region. When acting
+        # as one, it paints an opaque background and scales content by the
+        # override (so glyphs/text magnify, not just the box).
+        self._fill_bg = False
+        self._scale_override: float | None = None
         self._theme: Theme | None = None
         self._lunation: Lunation | None = None
         self._void_begin: str | None = None      # 'HH:MM' the void begins
@@ -1282,9 +1292,10 @@ class DayCell(QPushButton):
             self.update()
 
     def wheelEvent(self, event) -> None:
-        # No zoom/scroll over the event canvas — swallow the wheel there.
-        if self._date is not None and not self._standalone \
-                and self._canvas_rect().contains(event.position()):
+        # Scroll to zoom: up magnifies the tile to 2x2, down shrinks it back.
+        # The parent (MonthView) owns the zoom overlay; the tile just reports.
+        if self._date is not None and not self._standalone:
+            self.scrolled.emit(1 if event.angleDelta().y() > 0 else -1)
             event.accept()
             return
         super().wheelEvent(event)
@@ -1335,6 +1346,7 @@ class DayCell(QPushButton):
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
         self.update()
+        self.left.emit()   # lets the parent collapse a zoom overlay on leave
         super().leaveEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
@@ -1543,13 +1555,18 @@ class DayCell(QPushButton):
         self._bar_hover_anim.stop()
         self._bar_hover = False
         self._bar_hover_progress = 0.0
+        self._show_weather = other._show_weather
+        self._weather = other._weather
+        self._wx_scale = other._wx_scale
         self._events = other._events
         self.update()
 
     def _paint_scale(self) -> float:
         """Scale factor for content; 1 for a grid tile. The expanded tile is
         only slightly larger (the extra room is for additional info/events,
-        not bigger glyphs)."""
+        not bigger glyphs). The zoom overlay drives it directly to magnify."""
+        if self._scale_override is not None:
+            return self._scale_override
         return 1.25 if self._standalone else 1.0
 
     def _number_hit_rect(self) -> QRectF:
@@ -1742,10 +1759,10 @@ class DayCell(QPushButton):
         h = self.height()
         s = self._paint_scale()
 
-        if self._standalone:
-            # Opaque background so the expanded tile covers the month grid.
+        if self._standalone or self._fill_bg:
+            # Opaque background so the expanded / zoomed tile covers the grid.
             p.fillRect(self.rect(), QColor(t.BG_1))
-        else:
+        if not self._standalone:
             # --- Seamless grid lines (single 1px strokes shared across cells:
             # every cell draws top + left; the outer column/row close it). ---
             grid_pen = QPen(QColor(t.TILE_LINE))
@@ -2068,6 +2085,27 @@ class MonthView(QWidget):
         self._expanded_start = QRect()
         self._collapsing = False
 
+        # Scroll-to-zoom: a floating overlay that magnifies a tile over a 2x2
+        # region. Parented to the grid container so its coords match the cells;
+        # hidden until a scroll-up zooms a tile in.
+        self._zoom = DayCell()
+        self._zoom.setParent(self._cal)
+        self._zoom._fill_bg = True
+        self._zoom.set_grid_edges(top=True, right=True, first_col=True)
+        self._zoom.hide()
+        self._zoom.scrolled.connect(self._on_zoom_scrolled)
+        self._zoom.left.connect(self._zoom_out)
+        self._zoom_source: DayCell | None = None
+        self._zoom_progress = 0.0
+        self._zoom_start = QRect()
+        self._zoom_target = QRect()
+        self._visible_rows = 6   # weeks shown this month (set in _refresh)
+        self._zoom_anim = QVariantAnimation(self)
+        self._zoom_anim.setDuration(160)
+        self._zoom_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._zoom_anim.valueChanged.connect(self._on_zoom_anim)
+        self._zoom_anim.finished.connect(self._on_zoom_anim_finished)
+
         # Event-value editor: a frame-filling box holding an event's full entry
         # in the expanded view (double-click a row to open it). Saves when
         # dismissed (click the date number / click away), discards on Escape.
@@ -2137,6 +2175,93 @@ class MonthView(QWidget):
         if self._collapsing:
             self._expanded.hide()
             self._collapsing = False
+
+    # -- scroll-to-zoom overlay ------------------------------------------
+    def _cell_rc(self, cell: "DayCell") -> tuple[int, int] | None:
+        try:
+            i = self._cells.index(cell)
+        except ValueError:
+            return None
+        return i // 7, i % 7
+
+    def _zoom_region_rect(self, cell: "DayCell") -> QRect | None:
+        """The 2x2 region (in grid-container coords) the zoom covers, anchored
+        so it always stays inside the 7x6 grid: a top/left tile expands
+        down/right, a bottom/right tile expands up/left."""
+        rc = self._cell_rc(cell)
+        if rc is None:
+            return None
+        # Anchor the 2x2 within the *visible* grid: cols are always 7, but a
+        # month shows 4-6 rows, so clamp the row to the last visible pair.
+        r0 = min(rc[0], max(0, self._visible_rows - 2))
+        c0 = min(rc[1], 5)
+        top_left = self._cells[r0 * 7 + c0].geometry()
+        bottom_right = self._cells[(r0 + 1) * 7 + (c0 + 1)].geometry()
+        return top_left.united(bottom_right)
+
+    def _on_cell_scrolled(self, direction: int) -> None:
+        cell = self.sender()
+        if not isinstance(cell, DayCell) or cell.date is None:
+            return
+        if direction > 0:
+            self._zoom_in(cell)
+        else:
+            self._zoom_out()
+
+    def _zoom_in(self, cell: "DayCell") -> None:
+        region = self._zoom_region_rect(cell)
+        if region is None:
+            return
+        fresh = cell is not self._zoom_source
+        self._zoom_source = cell
+        self._zoom_start = QRect(cell.geometry())
+        self._zoom_target = region
+        if fresh:
+            self._zoom.set_theme(self._theme.current)
+            self._zoom.copy_from(cell)
+            self._zoom.set_grid_edges(top=True, right=True, first_col=True)
+            self._zoom_progress = 0.0
+            self._zoom.setGeometry(self._zoom_start)
+            self._zoom._scale_override = 1.0
+        self._zoom.show()
+        self._zoom.raise_()
+        if self._zoom_progress >= 1.0:
+            return  # already fully zoomed
+        self._zoom_anim.stop()
+        self._zoom_anim.setStartValue(self._zoom_progress)
+        self._zoom_anim.setEndValue(1.0)
+        self._zoom_anim.start()
+
+    def _zoom_out(self) -> None:
+        if not self._zoom.isVisible() or self._zoom_progress <= 0.0:
+            return
+        self._zoom_anim.stop()
+        self._zoom_anim.setStartValue(self._zoom_progress)
+        self._zoom_anim.setEndValue(0.0)
+        self._zoom_anim.start()
+
+    def _on_zoom_anim(self, value) -> None:
+        p = float(value)
+        self._zoom_progress = p
+        s, t = self._zoom_start, self._zoom_target
+
+        def lerp(a: int, b: int) -> int:
+            return int(round(a + (b - a) * p))
+
+        self._zoom.setGeometry(lerp(s.x(), t.x()), lerp(s.y(), t.y()),
+                               lerp(s.width(), t.width()), lerp(s.height(), t.height()))
+        self._zoom._scale_override = 1.0 + p   # 1x .. 2x, in step with the size
+        self._zoom.update()
+
+    def _on_zoom_anim_finished(self) -> None:
+        if self._zoom_progress <= 0.001:
+            self._zoom.hide()
+            self._zoom_source = None
+            self._zoom._scale_override = None
+
+    def _on_zoom_scrolled(self, direction: int) -> None:
+        if direction < 0:          # scrolling down over the overlay collapses it
+            self._zoom_out()
 
     # -- event notes (expanded view) -------------------------------------
     def _open_note(self, index: int) -> None:
@@ -2298,6 +2423,7 @@ class MonthView(QWidget):
                 cell.event_delete_requested.connect(self._on_event_delete)
                 cell.event_repeat_requested.connect(self._on_event_repeat)
                 cell.event_propagate_requested.connect(self._on_event_propagate)
+                cell.scrolled.connect(self._on_cell_scrolled)
                 grid.addWidget(cell, r, c)
                 self._cells.append(cell)
         return grid
@@ -2834,6 +2960,8 @@ class MonthView(QWidget):
         today = self._model.today
         location = current_location()
 
+        self._visible_rows = len(weeks)   # 4-6; the zoom anchor stays within it
+        self._zoom_out()                  # a month change drops any open zoom
         last_row = len(weeks) - 1
         for idx, cell in enumerate(self._cells):
             row, col = divmod(idx, 7)

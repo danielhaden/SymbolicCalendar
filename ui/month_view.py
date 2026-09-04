@@ -734,13 +734,26 @@ class DayCell(QPushButton):
         self.update()
 
     # -- placement grid (9x6) hover --------------------------------------
+    def _grid_cell_rect(self, col: int, row: int) -> QRectF:
+        """The rect of a placement-grid cell (in tile coords)."""
+        cw = self.width() / _TILE_GRID_COLS
+        ch = self.height() / _TILE_GRID_ROWS
+        return QRectF(col * cw, row * ch, cw, ch)
+
+    def _grid_reserved(self, col: int, row: int) -> bool:
+        """Cells that can't take an event; the date sits in the top-left one."""
+        return (col, row) == (0, 0)
+
     def _grid_cell_at(self, pos) -> tuple[int, int] | None:
-        """The (col, row) of the 9x6 placement grid under ``pos``."""
+        """The (col, row) of the 9x6 placement grid under ``pos``, or None for a
+        reserved cell (so it neither highlights nor accepts events)."""
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0:
             return None
         col = min(_TILE_GRID_COLS - 1, max(0, int(pos.x() / (w / _TILE_GRID_COLS))))
         row = min(_TILE_GRID_ROWS - 1, max(0, int(pos.y() / (h / _TILE_GRID_ROWS))))
+        if self._grid_reserved(col, row):
+            return None
         return col, row
 
     def _set_grid_cell(self, cell) -> None:
@@ -1131,27 +1144,12 @@ class DayCell(QPushButton):
         return font
 
     def _number_rect(self) -> QRectF:
-        """Top-left exclusion zone around the date number: grid-tile event boxes
-        may not sit on or be dragged onto it. Empty on the expanded tile, whose
-        canvas already clears the number. Measured bold — the widest state — so
-        the zone is stable across hover/today and doesn't shift under a box
-        mid-drag."""
+        """The reserved top-left grid cell that holds the date: grid-tile event
+        boxes may not sit on or be dragged onto it. Empty on the expanded tile,
+        whose canvas already clears the number."""
         if self._standalone or self._date is None:
             return QRectF()
-        s = self._paint_scale()
-        bars = self._bars_width()
-        left = ((bars + 4) if bars else 9) * s
-        font = QFont(self.font())
-        font.setPixelSize(max(1, round(13 * s)))
-        font.setBold(True)
-        fm = QFontMetricsF(font)
-        top = 9.0 * s
-        right = left + fm.horizontalAdvance(str(self._date.day))
-        bottom = top + fm.height()
-        pad = _EVENT_BOX_PAD * s + 1.0
-        # Extend to the left tile edge — there's no useful space left of the
-        # number — and pad the other sides so boxes keep a small gap.
-        return QRectF(0.0, top - pad, right + pad, (bottom - top) + 2 * pad)
+        return self._grid_cell_rect(0, 0)
 
     def _moon_glyph_rect(self) -> QRectF:
         """Top-right exclusion zone around the moon-phase glyph, when it's shown
@@ -2012,12 +2010,19 @@ class DayCell(QPushButton):
         font.setUnderline(self._standalone and self._today)
         p.setFont(font)
         p.setPen(num_color)
-        # Start the number right of the left-edge bars (when shown) so they
-        # never overlap; otherwise use the normal left padding.
-        bars = self._bars_width()
-        left = (bars + 4) if bars else 9
-        text_rect = QRectF(self.rect()).adjusted(left * s, 9 * s, -5 * s, -5 * s)
-        p.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
+        if self._standalone:
+            # Start the number right of the left-edge bars (when shown) so they
+            # never overlap; otherwise use the normal left padding.
+            bars = self._bars_width()
+            left = (bars + 4) if bars else 9
+            text_rect = QRectF(self.rect()).adjusted(left * s, 9 * s, -5 * s, -5 * s)
+            p.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
+        else:
+            # Grid tile: the date sits in the reserved top-left grid cell (which
+            # takes no hover highlight or events), snug in the corner.
+            cell0 = self._grid_cell_rect(0, 0)
+            p.drawText(cell0.adjusted(2.0 * s, 1.0 * s, 0, 0),
+                       Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
 
         # --- Moon-bar hover: the hovered span's moonrise (at its top) and
         # moonset (at its bottom) as small time chips. Rise/set may fall on the

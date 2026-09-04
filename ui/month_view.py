@@ -143,6 +143,10 @@ _WX_TEMP_ALPHA = 145        # temperature line opacity over TEXT (lower = greyer
 _WX_PRESS_ALPHA = 100       # pressure line opacity over TEXT
 _WX_DOT_ALPHA = 130         # pressure high/low dots (a touch above the line)
 
+# Scroll-to-zoom: the deepest level, i.e. the largest NxN block a tile magnifies
+# over (4 -> up to 4x4). Levels step 2x2, 3x3, 4x4.
+_ZOOM_MAX_LEVEL = 4
+
 
 def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
     """Linear interpolation between two colors (t in 0..1)."""
@@ -2091,9 +2095,10 @@ class MonthView(QWidget):
         self._expanded_start = QRect()
         self._collapsing = False
 
-        # Scroll-to-zoom: a floating overlay that magnifies a tile over a 2x2
-        # region. Parented to the grid container so its coords match the cells;
-        # hidden until a scroll-up zooms a tile in.
+        # Scroll-to-zoom: a floating overlay that magnifies a tile over an NxN
+        # region. Each scroll-up steps the level 1->2->3->4 (2x2 up to 4x4);
+        # scroll-down steps back and collapses. Parented to the grid container so
+        # its coords match the cells; hidden until zoomed in.
         self._zoom = DayCell()
         self._zoom.setParent(self._cal)
         self._zoom._fill_bg = True
@@ -2102,9 +2107,11 @@ class MonthView(QWidget):
         self._zoom.scrolled.connect(self._on_zoom_scrolled)
         self._zoom.left.connect(self._zoom_out)
         self._zoom_source: DayCell | None = None
-        self._zoom_progress = 0.0
-        self._zoom_start = QRect()
-        self._zoom_target = QRect()
+        self._zoom_level = 1            # 1 = collapsed; 2/3/4 = NxN
+        self._zoom_from_rect = QRect()
+        self._zoom_to_rect = QRect()
+        self._zoom_from_scale = 1.0
+        self._zoom_to_scale = 1.0
         self._visible_rows = 6   # weeks shown this month (set in _refresh)
         self._zoom_anim = QVariantAnimation(self)
         self._zoom_anim.setDuration(160)
@@ -2190,84 +2197,90 @@ class MonthView(QWidget):
             return None
         return i // 7, i % 7
 
-    def _zoom_region_rect(self, cell: "DayCell") -> QRect | None:
-        """The 2x2 region (in grid-container coords) the zoom covers, anchored
-        so it always stays inside the 7x6 grid: a top/left tile expands
-        down/right, a bottom/right tile expands up/left."""
+    def _zoom_region_rect(self, cell: "DayCell", n: int) -> QRect | None:
+        """The NxN region (in grid-container coords) the zoom covers, anchored so
+        it always stays inside the visible grid: a top/left tile expands
+        down/right, a bottom/right tile up/left. Cols are always 7; a month
+        shows 4-6 rows, so the row anchor is clamped to the visible rows."""
         rc = self._cell_rc(cell)
         if rc is None:
             return None
-        # Anchor the 2x2 within the *visible* grid: cols are always 7, but a
-        # month shows 4-6 rows, so clamp the row to the last visible pair.
-        r0 = min(rc[0], max(0, self._visible_rows - 2))
-        c0 = min(rc[1], 5)
+        r0 = min(rc[0], max(0, self._visible_rows - n))
+        c0 = min(rc[1], max(0, 7 - n))
         top_left = self._cells[r0 * 7 + c0].geometry()
-        bottom_right = self._cells[(r0 + 1) * 7 + (c0 + 1)].geometry()
+        bottom_right = self._cells[(r0 + n - 1) * 7 + (c0 + n - 1)].geometry()
         return top_left.united(bottom_right)
 
     def _on_cell_scrolled(self, direction: int) -> None:
-        cell = self.sender()
+        self._zoom_step(self.sender(), 1 if direction > 0 else -1)
+
+    def _on_zoom_scrolled(self, direction: int) -> None:
+        # Scrolling over the overlay steps the level too (up = deeper zoom).
+        self._zoom_step(self._zoom_source, 1 if direction > 0 else -1)
+
+    def _zoom_step(self, cell, delta: int) -> None:
+        """Change the zoom by one level (2x2 -> 3x3 -> 4x4, and back). Scrolling
+        a different tile restarts the zoom on it."""
         if not isinstance(cell, DayCell) or cell.date is None:
             return
-        if direction > 0:
-            self._zoom_in(cell)
-        else:
-            self._zoom_out()
+        if cell is not self._zoom_source:
+            self._zoom_source = cell
+            self._zoom_level = 1
+        level = max(1, min(_ZOOM_MAX_LEVEL, self._zoom_level + delta))
+        if level != self._zoom_level:
+            self._animate_zoom(cell, level)
 
-    def _zoom_in(self, cell: "DayCell") -> None:
-        region = self._zoom_region_rect(cell)
-        if region is None:
-            return
-        fresh = cell is not self._zoom_source
-        self._zoom_source = cell
-        self._zoom_start = QRect(cell.geometry())
-        self._zoom_target = region
-        if fresh:
+    def _zoom_out(self) -> None:
+        """Collapse fully (e.g. the cursor left the overlay, or the month changed)."""
+        if self._zoom_source is not None and self._zoom_level > 1:
+            self._animate_zoom(self._zoom_source, 1)
+
+    def _animate_zoom(self, cell: "DayCell", level: int) -> None:
+        if level > 1:
+            region = self._zoom_region_rect(cell, level)
+            if region is None:
+                return
+        # Starting from collapsed: seed the overlay at the source tile, 1x.
+        if self._zoom_level <= 1 or not self._zoom.isVisible():
             self._zoom.set_theme(self._theme.current)
             self._zoom.copy_from(cell)
             self._zoom.set_grid_edges(top=True, right=True, first_col=True)
-            self._zoom_progress = 0.0
-            self._zoom.setGeometry(self._zoom_start)
+            self._zoom.setGeometry(cell.geometry())
             self._zoom._scale_override = 1.0
-        self._zoom.show()
-        self._zoom.raise_()
-        if self._zoom_progress >= 1.0:
-            return  # already fully zoomed
+            self._zoom.show()
+            self._zoom.raise_()
+        self._zoom_from_rect = QRect(self._zoom.geometry())
+        self._zoom_from_scale = self._zoom._scale_override or 1.0
+        self._zoom_level = level
+        if level > 1:
+            self._zoom_to_rect = region
+            self._zoom_to_scale = float(level)
+        else:
+            self._zoom_to_rect = QRect(cell.geometry())
+            self._zoom_to_scale = 1.0
         self._zoom_anim.stop()
-        self._zoom_anim.setStartValue(self._zoom_progress)
+        self._zoom_anim.setStartValue(0.0)
         self._zoom_anim.setEndValue(1.0)
-        self._zoom_anim.start()
-
-    def _zoom_out(self) -> None:
-        if not self._zoom.isVisible() or self._zoom_progress <= 0.0:
-            return
-        self._zoom_anim.stop()
-        self._zoom_anim.setStartValue(self._zoom_progress)
-        self._zoom_anim.setEndValue(0.0)
         self._zoom_anim.start()
 
     def _on_zoom_anim(self, value) -> None:
         p = float(value)
-        self._zoom_progress = p
-        s, t = self._zoom_start, self._zoom_target
+        fr, to = self._zoom_from_rect, self._zoom_to_rect
 
         def lerp(a: int, b: int) -> int:
             return int(round(a + (b - a) * p))
 
-        self._zoom.setGeometry(lerp(s.x(), t.x()), lerp(s.y(), t.y()),
-                               lerp(s.width(), t.width()), lerp(s.height(), t.height()))
-        self._zoom._scale_override = 1.0 + p   # 1x .. 2x, in step with the size
+        self._zoom.setGeometry(lerp(fr.x(), to.x()), lerp(fr.y(), to.y()),
+                               lerp(fr.width(), to.width()), lerp(fr.height(), to.height()))
+        self._zoom._scale_override = (
+            self._zoom_from_scale + (self._zoom_to_scale - self._zoom_from_scale) * p)
         self._zoom.update()
 
     def _on_zoom_anim_finished(self) -> None:
-        if self._zoom_progress <= 0.001:
+        if self._zoom_level <= 1:
             self._zoom.hide()
             self._zoom_source = None
             self._zoom._scale_override = None
-
-    def _on_zoom_scrolled(self, direction: int) -> None:
-        if direction < 0:          # scrolling down over the overlay collapses it
-            self._zoom_out()
 
     # -- event notes (expanded view) -------------------------------------
     def _open_note(self, index: int) -> None:

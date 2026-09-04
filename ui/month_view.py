@@ -1295,7 +1295,13 @@ class DayCell(QPushButton):
         # Scroll to zoom: up magnifies the tile to 2x2, down shrinks it back.
         # The parent (MonthView) owns the zoom overlay; the tile just reports.
         if self._date is not None and not self._standalone:
-            self.scrolled.emit(1 if event.angleDelta().y() > 0 else -1)
+            # A trackpad fires a stream of events per gesture, including
+            # zero-delta phase/momentum-boundary markers (ScrollBegin/End).
+            # Treating those as "down" collapsed the zoom at the end of a
+            # scroll-up, so only respond to a real vertical delta.
+            delta = event.angleDelta().y() or event.pixelDelta().y()
+            if delta:
+                self.scrolled.emit(1 if delta > 0 else -1)
             event.accept()
             return
         super().wheelEvent(event)

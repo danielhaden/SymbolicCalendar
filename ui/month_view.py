@@ -147,6 +147,12 @@ _WX_DOT_ALPHA = 130         # pressure high/low dots (a touch above the line)
 # over (4 -> up to 4x4). Levels step 2x2, 3x3, 4x4.
 _ZOOM_MAX_LEVEL = 4
 
+# Per-tile placement grid (for snapping events): 9 columns x 6 rows. Invisible
+# until hovered, when the cell under the cursor fades to a faint grey.
+_TILE_GRID_COLS = 9
+_TILE_GRID_ROWS = 6
+_TILE_GRID_ALPHA = 30       # hovered-cell fill opacity over TEXT (very light)
+
 
 def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
     """Linear interpolation between two colors (t in 0..1)."""
@@ -386,6 +392,13 @@ class DayCell(QPushButton):
         self._weather: DayWeather | None = None
         self._wx_scale: tuple[float, float, float, float] | None = None
         self._weather_hover: QPointF | None = None  # cursor pos over the band
+        # Placement grid: the 9x6 cell under the cursor, faded in on hover.
+        self._grid_cell: tuple[int, int] | None = None
+        self._grid_progress = 0.0
+        self._grid_anim = QVariantAnimation(self)
+        self._grid_anim.setDuration(_MOONBAR_FADE_MS)
+        self._grid_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._grid_anim.valueChanged.connect(self._on_grid_anim)
         self._events: list[Occurrence] = []     # this day's resolved occurrences
         # Drag state for moving an event box within the canvas (grid tiles).
         self._drag_index: int | None = None
@@ -719,6 +732,51 @@ class DayCell(QPushButton):
     def _on_bar_hover_anim(self, value: float) -> None:
         self._bar_hover_progress = float(value)
         self.update()
+
+    # -- placement grid (9x6) hover --------------------------------------
+    def _grid_cell_at(self, pos) -> tuple[int, int] | None:
+        """The (col, row) of the 9x6 placement grid under ``pos``."""
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return None
+        col = min(_TILE_GRID_COLS - 1, max(0, int(pos.x() / (w / _TILE_GRID_COLS))))
+        row = min(_TILE_GRID_ROWS - 1, max(0, int(pos.y() / (h / _TILE_GRID_ROWS))))
+        return col, row
+
+    def _set_grid_cell(self, cell) -> None:
+        """Track the hovered grid cell; fade the highlight in on hover, out on
+        leave (the last cell is kept so it can fade out)."""
+        if cell is not None:
+            if cell != self._grid_cell:
+                self._grid_cell = cell
+                self.update()
+            self._grid_fade_to(1.0)
+        else:
+            self._grid_fade_to(0.0)
+
+    def _grid_fade_to(self, end: float) -> None:
+        if self._grid_progress == end \
+                and self._grid_anim.state() != QVariantAnimation.Running:
+            return
+        self._grid_anim.stop()
+        self._grid_anim.setStartValue(self._grid_progress)
+        self._grid_anim.setEndValue(end)
+        self._grid_anim.start()
+
+    def _on_grid_anim(self, value) -> None:
+        self._grid_progress = float(value)
+        self.update()
+
+    def _draw_grid_hover(self, p: QPainter, t: Theme) -> None:
+        """Fill the hovered 9x6 cell with a very light grey (faded by hover)."""
+        if self._grid_cell is None or self._grid_progress <= 0.0:
+            return
+        cw = self.width() / _TILE_GRID_COLS
+        ch = self.height() / _TILE_GRID_ROWS
+        col, row = self._grid_cell
+        fill = QColor(t.TEXT)
+        fill.setAlpha(round(_TILE_GRID_ALPHA * self._grid_progress))
+        p.fillRect(QRectF(col * cw, row * ch, cw, ch), fill)
 
     # -- ascendant-band glyph hover (ingress / void-of-course) -----------
     def _ingress_at(self, pos) -> tuple[QRectF, tuple] | None:
@@ -1355,6 +1413,7 @@ class DayCell(QPushButton):
         if self._daylight_hover:
             self._daylight_hover = False
             self.daylight_hover_changed.emit()
+        self._set_grid_cell(None)   # fade out the placement-grid highlight
         self.update()
         self.left.emit()   # lets the parent collapse a zoom overlay on leave
         super().leaveEvent(event)
@@ -1372,6 +1431,7 @@ class DayCell(QPushButton):
         if self._drag_index is not None and (event.buttons() & Qt.LeftButton):
             self._drag_event_to(pos)
             return
+        self._set_grid_cell(self._grid_cell_at(pos))  # placement-grid hover
         # Ascendant band: hovering its strip grows it open. Hysteresis — open
         # when over the collapsed strip, stay open while over the expanded band.
         if self._asc_can_expand():
@@ -1809,6 +1869,9 @@ class DayCell(QPushButton):
                 for frac in (1.0 / 3.0, 2.0 / 3.0):
                     x = round(w * frac) + 0.5
                     p.drawLine(QPointF(x, 0), QPointF(x, h))
+
+            # Placement-grid hover: the hovered 9x6 cell, faded to light grey.
+            self._draw_grid_hover(p, t)
 
         # --- Daylight bar: civil dawn..dusk on the tile's 24h axis, filled with
         # a backslash '\' hatch — perpendicular to the moon bar's '/' so the two

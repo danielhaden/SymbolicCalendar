@@ -116,6 +116,7 @@ _ASC_PLANET_PX = 8.5     # stacked planet/luminary glyph size
 _ASC_ROW = 10.0          # vertical pitch per stacked planet
 _ASC_GLYPH_GAP = 2.5     # gap below the sign glyph before the first planet
 _ASC_BOTTOM_PAD = 2.5    # padding below the last planet
+_ASC_BAR_GAP = 4.0       # gap above the band's glyphs so they clear the daylight/moon bar
 _ASC_ARROW_PX = 7.0      # ingress arrow drawn after an ingressing body's glyph
 _BAR_HATCH_GAP = 4.6      # spacing between hatch lines (larger = sparser)
 _BAR_HATCH_WIDTH = 1.8    # hatch line thickness
@@ -520,13 +521,18 @@ class DayCell(QPushButton):
 
     def _asc_height(self) -> float:
         """Scaled height reserved at the very bottom for the ascendant band: the
-        *collapsed* body plus the sign glyph's upper half straddling the top
-        line. The expansion overlays the tile, so only this is reserved. 0 when
-        hidden, on the expanded tile, or there's no data."""
+        *collapsed* body, the sign glyph's upper half straddling the top line,
+        and a gap above so the glyphs clear the daylight/moon bar. Reserving the
+        gap here lifts the bar (which sits at ``_time_axis_bottom``) off the
+        glyph tops without moving the band itself. The expansion overlays the
+        tile, so only this is reserved. 0 when hidden, on the expanded tile, or
+        there's no data."""
         if self._standalone or not (self._show_ascendant
                                     and self._ascendant is not None):
             return 0.0
-        return self._asc_collapsed_body() + _ASC_SIGN_PX * 0.5 * self._paint_scale()
+        s = self._paint_scale()
+        return (self._asc_collapsed_body() + _ASC_SIGN_PX * 0.5 * s
+                + _ASC_BAR_GAP * s)
 
     def _asc_can_expand(self) -> bool:
         """True when the band has stacked planets worth revealing on hover."""

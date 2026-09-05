@@ -67,6 +67,10 @@ _ZOOM_MAX_LEVEL = 4
 
 _EVENT_MAX_CHARS = 20    # hard cap on an event's label length
 
+# Vertical gap (px) between week rows. Columns stay seamless (0 horizontal
+# spacing); only the rows are separated.
+_ROW_GAP = 12
+
 
 class EventEdit(QLineEdit):
     """One-line editor for an event's on-canvas text. Commits on Enter or when
@@ -541,7 +545,10 @@ class MonthView(QWidget):
 
     def _build_grid(self) -> QGridLayout:
         grid = QGridLayout()
-        grid.setSpacing(0)  # seamless grid: cells share their edges
+        # Columns stay seamless (cells share vertical edges); week rows are
+        # separated by a small vertical gap.
+        grid.setHorizontalSpacing(0)
+        grid.setVerticalSpacing(_ROW_GAP)
         self._cells: list[DayCell] = []
         # 6 weeks x 7 days is enough to render any month.
         for r in range(6):

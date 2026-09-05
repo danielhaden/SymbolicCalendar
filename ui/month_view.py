@@ -2004,7 +2004,8 @@ class DayCell(QPushButton):
         emphasize = self._today or self._hover or self._standalone
 
         font = QFont(self.font())
-        font.setPixelSize(max(1, round((23 if self._standalone else 13) * s)))
+        # Grid tiles: sized so a two-digit date fits the reserved top-left cell.
+        font.setPixelSize(max(1, round((23 if self._standalone else 11) * s)))
         font.setBold(emphasize)
         font.setItalic(self._weekend)
         font.setUnderline(self._standalone and self._today)
@@ -2019,10 +2020,13 @@ class DayCell(QPushButton):
             p.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
         else:
             # Grid tile: the date sits in the reserved top-left grid cell (which
-            # takes no hover highlight or events), snug in the corner.
+            # takes no hover highlight or events), snug in the corner. Draw into
+            # a box wider than the cell so a two-digit date is never clipped; the
+            # smaller grid-tile font keeps it within the cell.
             cell0 = self._grid_cell_rect(0, 0)
-            p.drawText(cell0.adjusted(2.0 * s, 1.0 * s, 0, 0),
-                       Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
+            box = QRectF(cell0.left() + 1.5 * s, cell0.top() + 1.0 * s,
+                         cell0.width() * 2.0, cell0.height())
+            p.drawText(box, Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
 
         # --- Moon-bar hover: the hovered span's moonrise (at its top) and
         # moonset (at its bottom) as small time chips. Rise/set may fall on the

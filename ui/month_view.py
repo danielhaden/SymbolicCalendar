@@ -2026,11 +2026,13 @@ class DayCell(QPushButton):
             p.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
         else:
             # Grid tile: the date sits in the reserved top-left grid cell (which
-            # takes no hover highlight or events), snug in the corner. Draw into
-            # a box wider than the cell so a two-digit date is never clipped; the
+            # takes no hover highlight or events). Inset from the tile's top edge
+            # so the number clears the dividing line (and the tile-above's band
+            # that meets it there) instead of sitting on it. Draw into a box
+            # wider than the cell so a two-digit date is never clipped; the
             # smaller grid-tile font keeps it within the cell.
             cell0 = self._grid_cell_rect(0, 0)
-            box = QRectF(cell0.left() + 1.5 * s, cell0.top() + 1.0 * s,
+            box = QRectF(cell0.left() + 1.5 * s, cell0.top() + 4.0 * s,
                          cell0.width() * 2.0, cell0.height())
             p.drawText(box, Qt.AlignLeft | Qt.AlignTop, str(self._date.day))
 

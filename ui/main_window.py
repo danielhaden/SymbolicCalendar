@@ -47,7 +47,8 @@ from model import (
 )
 from model.updates import Release, check_for_update
 from .theme import ThemeManager
-from .month_view import MonthView, PLANETS
+from .month_view import MonthView
+from .symbols import PLANETS
 from .chat_drawer import ChatDrawer
 from .settings_dialog import (
     BAR_THICKNESS_MAX,

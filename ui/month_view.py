@@ -560,7 +560,6 @@ class MonthView(QWidget):
                 cell.event_add_requested.connect(self._on_event_add)
                 cell.event_edit_requested.connect(self._on_event_edit)
                 cell.event_moved.connect(self._on_event_moved)
-                cell.event_resized.connect(self._on_event_resized)
                 cell.event_delete_requested.connect(self._on_event_delete)
                 cell.event_repeat_requested.connect(self._on_event_repeat)
                 cell.event_propagate_requested.connect(self._on_event_propagate)
@@ -570,13 +569,13 @@ class MonthView(QWidget):
         return grid
 
     # -- grid-tile events (free-text, draggable) -------------------------
-    def _on_event_add(self, x: float, y: float) -> None:
-        # "Add Event" from the canvas context menu: create an empty event at
-        # the clicked spot and open its inline editor for typing.
+    def _on_event_add(self, col: int, row: int) -> None:
+        # "Add Event" from the context menu: create an empty event in the
+        # clicked grid cell and open its inline editor for typing.
         cell = self.sender()
         if not isinstance(cell, DayCell) or cell.date is None:
             return
-        self._events.add_event(cell.date, "", x, y)
+        self._events.add_event(cell.date, "", col, row)
         self._refresh_events(cell, cell.date)
         self._begin_event_edit(cell, cell.date, len(cell._events) - 1)
 
@@ -585,25 +584,22 @@ class MonthView(QWidget):
         if isinstance(cell, DayCell) and cell.date is not None:
             self._begin_event_edit(cell, cell.date, index)
 
-    def _on_event_moved(self, index: int, x: float, y: float) -> None:
+    def _on_event_moved(self, index: int, col: int, row: int) -> None:
         cell = self.sender()
         if not isinstance(cell, DayCell) or cell.date is None:
             return
         if not 0 <= index < len(cell._events):
             return
-        # Dragging moves the whole series (one shared position); no prompt.
+        # Dragging moves the whole series (one shared cell); no prompt. One event
+        # per cell: if the target is occupied, swap — the occupant takes the
+        # dragged event's old cell.
         occ = cell._events[index]
-        self._events.set_position(occ.event_id, cell.date, x, y, "series")
-        self._refresh_events(cell, cell.date)
-
-    def _on_event_resized(self, index: int, size: float) -> None:
-        cell = self.sender()
-        if not isinstance(cell, DayCell) or cell.date is None:
-            return
-        if not 0 <= index < len(cell._events):
-            return
-        # Font size is a series-wide display property (like position); no prompt.
-        self._events.set_size(cell._events[index].event_id, size)
+        occupant = self._events.cell_occupant(
+            cell.date, col, row, exclude_id=occ.event_id)
+        if occupant is not None:
+            self._events.set_cell(occupant.event_id, cell.date,
+                                  occ.col, occ.row, "series")
+        self._events.set_cell(occ.event_id, cell.date, col, row, "series")
         self._refresh_events(cell, cell.date)
 
     def _on_event_delete(self, index: int) -> None:

@@ -11,9 +11,13 @@ interval, and an optional end date). Individual occurrences can be overridden or
 skipped via ``overrides`` (keyed by ISO date) — this powers "edit/delete just
 this one" versus "the whole series".
 
-Events are stored event-centric in ``events.json`` (``{"events": [...]}``).
-Older files are migrated on load: day-keyed ``{"YYYY-MM-DD": [...]}`` files, and
-the earlier ``text``/``notes`` field names (now ``key``/``value``).
+Events are placed on a per-tile grid: each carries a ``col``/``row`` index into
+the day tile's placement grid (see ``GRID_COLS``/``GRID_ROWS``), and at most one
+event occupies a cell on a given day. Stored event-centric in ``events.json``
+(``{"events": [...]}``). Older files are migrated on load: day-keyed
+``{"YYYY-MM-DD": [...]}`` files, the earlier ``text``/``notes`` field names (now
+``key``/``value``), and the earlier free-form ``x``/``y`` positions (now reset
+to grid cells, to be re-placed).
 
 The UI works with :class:`Occurrence` objects (a resolved event on a specific
 day, overrides applied) from :meth:`Events.occurrences_on`.
@@ -31,14 +35,38 @@ _DEFAULT_PATH = Path(__file__).resolve().parent.parent / "events.json"
 
 _FREQS = ("daily", "weekly", "monthly", "yearly")
 
+# Event placement grid, per day tile: a (col, row) index into the tile's grid.
+# Row 0 is the tile header (date number + moon-phase glyph) and the last row
+# overlaps the daylight/moon bars and the ascendant band, so events occupy the
+# body rows only. This is the single source of truth for the grid dimensions;
+# the UI imports these to draw and snap.
+GRID_COLS = 9
+GRID_ROWS = 6
+_EVENT_ROW_MIN = 1
+_EVENT_ROW_MAX = GRID_ROWS - 2          # 4 (row 5 reserved for band/bars)
+_DEFAULT_CELL = (0, _EVENT_ROW_MIN)     # (col, row) fallback placement
 
-def _clamp01(value: object) -> float:
-    """Coerce ``value`` to a float in [0, 1] (canvas fraction), defaulting to
-    0.5 when it isn't a usable number."""
+
+def _valid_cells() -> list[tuple[int, int]]:
+    """Every cell an event may occupy, in row-major order."""
+    return [(c, r) for r in range(_EVENT_ROW_MIN, _EVENT_ROW_MAX + 1)
+            for c in range(GRID_COLS)]
+
+
+def cell_is_valid(col: int, row: int) -> bool:
+    """True if (col, row) is a body cell an event may occupy."""
+    return 0 <= col < GRID_COLS and _EVENT_ROW_MIN <= row <= _EVENT_ROW_MAX
+
+
+def _clamp_cell(col: object, row: object) -> tuple[int, int]:
+    """Coerce (col, row) to a valid body cell, defaulting when unusable."""
     try:
-        return max(0.0, min(1.0, float(value)))  # type: ignore[arg-type]
+        c, r = int(col), int(row)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return 0.5
+        return _DEFAULT_CELL
+    c = max(0, min(GRID_COLS - 1, c))
+    r = max(_EVENT_ROW_MIN, min(_EVENT_ROW_MAX, r))
+    return c, r
 
 
 def _parse_date(value: object) -> date | None:
@@ -101,17 +129,17 @@ class Event:
     """A calendar event (one-off, or a recurring series).
 
     ``key`` is the ≤20-char label the month grid shows (a symbol or short
-    string); ``value`` is the longer free-text detail. ``x``/``y`` are the key's
-    box centre as canvas fractions. ``start`` is the first occurrence; ``recur``
-    is None for a one-off. ``overrides`` maps an occurrence's ISO date to a
-    change: ``{"deleted": true}`` to skip it, or any of key/value/x/y to modify
-    just that occurrence.
+    string); ``value`` is the longer free-text detail. ``col``/``row`` are the
+    key's cell in the day tile's placement grid. ``start`` is the first
+    occurrence; ``recur`` is None for a one-off. ``overrides`` maps an
+    occurrence's ISO date to a change: ``{"deleted": true}`` to skip it, or any
+    of key/value/col/row to modify just that occurrence.
     """
 
     key: str
     value: str = ""
-    x: float = 0.5
-    y: float = 0.5
+    col: int = _DEFAULT_CELL[0]
+    row: int = _DEFAULT_CELL[1]
     size: float = 0.0          # key font size (unscaled px); 0 = UI default
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     start: date | None = None
@@ -121,7 +149,7 @@ class Event:
     def to_dict(self) -> dict:
         d: dict = {
             "id": self.id, "key": self.key, "value": self.value,
-            "x": self.x, "y": self.y,
+            "col": self.col, "row": self.row,
             "start": (self.start or date.today()).isoformat(),
         }
         if self.size > 0:
@@ -154,9 +182,12 @@ class Event:
             size = max(0.0, float(d.get("size", 0.0)))
         except (TypeError, ValueError):
             size = 0.0
+        # Legacy files (x/y positions, or none) have no col/row; they default
+        # here and get spread across cells in Events._load.
+        col, row = _clamp_cell(d.get("col", _DEFAULT_CELL[0]),
+                               d.get("row", _DEFAULT_CELL[1]))
         return Event(
-            key=str(key), value=str(value), x=_clamp01(d.get("x", 0.5)),
-            y=_clamp01(d.get("y", 0.5)), size=size,
+            key=str(key), value=str(value), col=col, row=row, size=size,
             id=str(d.get("id") or uuid.uuid4().hex), start=start,
             recur=recur, overrides=overrides,
         )
@@ -172,8 +203,8 @@ class Occurrence:
     day: date
     key: str
     value: str
-    x: float
-    y: float
+    col: int
+    row: int
     size: float
     recurring: bool
 
@@ -219,13 +250,13 @@ def _resolve(event: Event, day: date) -> Occurrence | None:
     ov = event.overrides.get(day.isoformat())
     if ov and ov.get("deleted"):
         return None
-    key, value, x, y = event.key, event.value, event.x, event.y
+    key, value, col, row = event.key, event.value, event.col, event.row
     if ov:
         key = str(ov.get("key", key))
         value = str(ov.get("value", value))
-        x = _clamp01(ov.get("x", x))
-        y = _clamp01(ov.get("y", y))
-    return Occurrence(event.id, day, key, value, x, y, event.size,
+        if "col" in ov or "row" in ov:
+            col, row = _clamp_cell(ov.get("col", col), ov.get("row", row))
+    return Occurrence(event.id, day, key, value, col, row, event.size,
                       event.recur is not None)
 
 
@@ -248,18 +279,28 @@ class Events:
             return
         if isinstance(data.get("events"), list):
             migrated = False
+            cells = _valid_cells()
+            legacy = 0
             for d in data["events"]:
                 if isinstance(d, dict):
                     ev = Event.from_dict(d)
                     if ev is not None:
+                        # Pre-grid events (no col/row): reset to a spread of
+                        # cells so they don't all pile onto one, then re-place.
+                        if "col" not in d or "row" not in d:
+                            ev.col, ev.row = cells[legacy % len(cells)]
+                            legacy += 1
+                            migrated = True
                         self._events.append(ev)
                         migrated = migrated or "key" not in d
             if migrated:
-                self._save()  # normalise old text/notes field names on disk
+                self._save()  # normalise old field names / positions on disk
         else:
             self._migrate_day_keyed(data)  # legacy {date: [events]}
 
     def _migrate_day_keyed(self, data: dict) -> None:
+        cells = _valid_cells()
+        i = 0
         for daykey, items in data.items():
             day = _parse_date(daykey)
             if day is None or not isinstance(items, list):
@@ -267,10 +308,11 @@ class Events:
             for it in items:
                 label = isinstance(it, dict) and (it.get("key") or it.get("text"))
                 if label:
+                    col, row = cells[i % len(cells)]
+                    i += 1
                     self._events.append(Event(
                         key=str(label), value=str(it.get("value", it.get("notes", ""))),
-                        x=_clamp01(it.get("x", 0.5)), y=_clamp01(it.get("y", 0.5)),
-                        start=day,
+                        col=col, row=row, start=day,
                     ))
         if self._events:
             self._save()  # rewrite in the new format
@@ -307,11 +349,25 @@ class Events:
     def event(self, event_id: str) -> Event | None:
         return next((e for e in self._events if e.id == event_id), None)
 
+    def cell_occupant(self, day: date, col: int, row: int,
+                      exclude_id: str | None = None) -> Occurrence | None:
+        """The occurrence in cell (col, row) on ``day``, if any — used to keep
+        one event per cell. ``exclude_id`` skips a given event (e.g. the one
+        being moved)."""
+        for occ in self.occurrences_on(day):
+            if occ.event_id == exclude_id:
+                continue
+            if occ.col == col and occ.row == row:
+                return occ
+        return None
+
     # -- scoped mutations (event-id based) -------------------------------
-    def add_event(self, day: date, key: str = "", x: float = 0.5,
-                  y: float = 0.5) -> Event:
+    def add_event(self, day: date, key: str = "",
+                  col: int | None = None, row: int | None = None) -> Event:
         """Create a one-off event on ``day`` and return it."""
-        ev = Event(key=key, x=_clamp01(x), y=_clamp01(y), start=day)
+        c, r = _clamp_cell(_DEFAULT_CELL[0] if col is None else col,
+                           _DEFAULT_CELL[1] if row is None else row)
+        ev = Event(key=key, col=c, row=r, start=day)
         self._events.append(ev)
         self._save()
         return ev
@@ -339,17 +395,19 @@ class Events:
             ev.value = value
         self._save()
 
-    def set_position(self, event_id: str, day: date, x: float, y: float,
-                     scope: str) -> None:
+    def set_cell(self, event_id: str, day: date, col: int, row: int,
+                 scope: str) -> None:
+        """Place the event in grid cell (col, row). ``scope`` "this" overrides
+        just this occurrence of a series; otherwise the whole series moves."""
         ev = self.event(event_id)
         if ev is None:
             return
-        x, y = _clamp01(x), _clamp01(y)
+        col, row = _clamp_cell(col, row)
         if scope == "this" and ev.recur is not None:
             ov = self._override(ev, day)
-            ov["x"], ov["y"] = x, y
+            ov["col"], ov["row"] = col, row
         else:
-            ev.x, ev.y = x, y
+            ev.col, ev.row = col, row
         self._save()
 
     def delete(self, event_id: str, day: date, scope: str) -> None:
@@ -375,9 +433,9 @@ class Events:
 
     def propagate(self, event_id: str, day: date, location: bool,
                   size: bool) -> int:
-        """Copy the event's chosen display properties (tile ``location`` = x/y,
-        and/or ``size``) onto every other event with the same key that starts
-        after ``day``. Returns how many events changed."""
+        """Copy the event's chosen display properties (tile ``location`` =
+        col/row, and/or ``size``) onto every other event with the same key that
+        starts after ``day``. Returns how many events changed."""
         src = self.event(event_id)
         if src is None or not (location or size):
             return 0
@@ -387,7 +445,7 @@ class Events:
                     or ev.start is None or ev.start <= day:
                 continue
             if location:
-                ev.x, ev.y = src.x, src.y
+                ev.col, ev.row = src.col, src.row
             if size:
                 ev.size = src.size
             changed += 1

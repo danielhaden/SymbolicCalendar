@@ -1,7 +1,15 @@
 """Business-logic layer for the calendar app."""
 
 from .calendar_model import CalendarModel
-from .events import Event, Events, Occurrence, RecurrenceRule
+from .events import (
+    GRID_COLS,
+    GRID_ROWS,
+    Event,
+    Events,
+    Occurrence,
+    RecurrenceRule,
+    cell_is_valid,
+)
 from .lunation import (
     Lunation,
     MoonAspect,
@@ -35,6 +43,9 @@ from .weather import DayWeather, Weather
 
 __all__ = [
     "CalendarModel",
+    "GRID_COLS",
+    "GRID_ROWS",
+    "cell_is_valid",
     "Event",
     "Events",
     "Occurrence",

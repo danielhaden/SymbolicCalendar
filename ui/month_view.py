@@ -560,7 +560,6 @@ class MonthView(QWidget):
                 cell.event_add_requested.connect(self._on_event_add)
                 cell.event_edit_requested.connect(self._on_event_edit)
                 cell.event_moved.connect(self._on_event_moved)
-                cell.event_resized.connect(self._on_event_resized)
                 cell.event_delete_requested.connect(self._on_event_delete)
                 cell.event_repeat_requested.connect(self._on_event_repeat)
                 cell.event_propagate_requested.connect(self._on_event_propagate)
@@ -601,16 +600,6 @@ class MonthView(QWidget):
             self._events.set_cell(occupant.event_id, cell.date,
                                   occ.col, occ.row, "series")
         self._events.set_cell(occ.event_id, cell.date, col, row, "series")
-        self._refresh_events(cell, cell.date)
-
-    def _on_event_resized(self, index: int, size: float) -> None:
-        cell = self.sender()
-        if not isinstance(cell, DayCell) or cell.date is None:
-            return
-        if not 0 <= index < len(cell._events):
-            return
-        # Font size is a series-wide display property (like position); no prompt.
-        self._events.set_size(cell._events[index].event_id, size)
         self._refresh_events(cell, cell.date)
 
     def _on_event_delete(self, index: int) -> None:

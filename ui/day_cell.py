@@ -114,14 +114,8 @@ _CANVAS_PAD = 3.0       # padding so the box doesn't touch other elements
 # Expanded-tile event list: a text column with the note alongside it.
 _EVENT_ROW_H = 24.0     # height of one event row
 _EVENT_TEXT_SIZE = 14.0  # event-text size in the expanded list
-# Free-text event boxes placed on the grid-tile canvas.
+# Event key glyphs on the grid tile (one per placement-grid cell).
 _EVENT_TEXT_PX = 9.5     # default unscaled pixel size of the label text
-_EVENT_BOX_PAD = 2.0     # padding inside an event's box, around the glyph ink
-# Per-event resize (drag the box's lower edge up/down to size the key text).
-_EVENT_MIN_PX = 7.0      # smallest key font size
-_EVENT_MAX_PX = 26.0     # largest key font size
-_EVENT_RESIZE_BAND = 4.0  # grab band around the box's bottom edge (unscaled)
-_EVENT_RESIZE_SENS = 0.16  # font px change per drag px (up = bigger)
 
 def _moon_lit_path(cx: float, cy: float, r: float,
                    illumination: float, waxing: bool) -> QPainterPath:
@@ -171,8 +165,6 @@ class DayCell(QPushButton):
     event_edit_requested = Signal(int)
     # Emitted after dragging an event to a new grid cell: (index, col, row).
     event_moved = Signal(int, int, int)
-    # Emitted after resizing an event box: (index, key font size in px).
-    event_resized = Signal(int, float)
     # Emitted from the grid-tile context menu to delete an event (index).
     event_delete_requested = Signal(int)
     # Emitted from the grid-tile context menu to set an event's recurrence.
@@ -309,11 +301,6 @@ class DayCell(QPushButton):
         self._drag_index: int | None = None
         self._drag_target: tuple[int, int] | None = None  # cell under the cursor
         self._drag_moved = False
-        # Resize state: dragging an event box's lower edge sizes its key text.
-        self._resize_index: int | None = None
-        self._resize_start_y = 0.0
-        self._resize_start_size = 0.0
-        self._resize_changed = False
         # Seamless grid: every cell draws its left + bottom edge, so a tile's
         # bottom coincides with the horizontal gridline. Row 0 / the last
         # column add the outer top / right edges.
@@ -979,11 +966,10 @@ class DayCell(QPushButton):
     def _canvas_rect(self) -> QRectF:
         """The event-canvas box in the tile body (right of the daylight bar).
 
-        On grid tiles the canvas runs nearly the full tile height; the date
-        number in the top-left is carved out separately (see ``_number_rect``)
-        so event boxes can't sit on it. On the expanded tile the canvas occupies
-        the left half of the body and runs the full height below the day number
-        (the right half is reserved for the event-detail editor)."""
+        Used for the expanded (standalone) tile's event list: the canvas
+        occupies the left half of the body and runs the full height below the
+        day number (the right half is reserved for the event-detail editor).
+        Grid tiles place events on the cell grid instead."""
         s = self._paint_scale()
         left = (self._bars_width() + 5.0) * s
         pad = _CANVAS_PAD * s
@@ -1053,33 +1039,6 @@ class DayCell(QPushButton):
         font.setPixelSize(max(1, round(size_px * self._paint_scale())))
         return font
 
-    def _number_rect(self) -> QRectF:
-        """The reserved top-left grid cell that holds the date: grid-tile event
-        boxes may not sit on or be dragged onto it. Empty on the expanded tile,
-        whose canvas already clears the number."""
-        if self._standalone or self._date is None:
-            return QRectF()
-        return self._grid_cell_rect(0, 0)
-
-    def _moon_glyph_rect(self) -> QRectF:
-        """Top-right exclusion zone around the moon-phase glyph, when it's shown
-        (it's off by default). Empty otherwise, or on the expanded tile."""
-        if self._standalone or not self._show_moon_glyph \
-                or self._lunation is None:
-            return QRectF()
-        s = self._paint_scale()
-        cx, cy, r = self.width() - 11.0 * s, 17.0 * s, _MOON_RADIUS * s
-        pad = _EVENT_BOX_PAD * s + 1.0
-        left = cx - r - pad
-        # Extend to the top and right tile edges — no useful space past the glyph.
-        return QRectF(left, 0.0, self.width() - left, cy + r + pad)
-
-    def _exclusion_rects(self) -> list[QRectF]:
-        """Header elements event boxes must avoid: the date number and, when
-        shown, the moon-phase glyph."""
-        return [r for r in (self._number_rect(), self._moon_glyph_rect())
-                if not r.isNull()]
-
     def _event_cell(self, index: int) -> tuple[int, int]:
         """The grid cell event ``index`` occupies — the live drag target while
         it is being dragged, otherwise its stored cell."""
@@ -1104,57 +1063,12 @@ class DayCell(QPushButton):
         row = min(_TILE_GRID_ROWS - 1, max(0, int(pos.y() / (h / _TILE_GRID_ROWS))))
         return (col, row) if cell_is_valid(col, row) else None
 
-    def _placement_blocked(self, index: int, rect: QRectF) -> bool:
-        """A candidate box position is blocked if it overlaps another event box
-        or a header exclusion zone (the date number / moon glyph)."""
-        if self._box_overlaps(index, rect):
-            return True
-        return any(rect.intersects(z) for z in self._exclusion_rects())
-
     def _event_box_at(self, pos) -> int | None:
         """Index of the grid-tile event box under ``pos`` (topmost first)."""
         for i in reversed(range(len(self._events))):
             if self._event_box_rect(i).contains(pos):
                 return i
         return None
-
-    def _event_resize_at(self, pos) -> int | None:
-        """Index of the event box whose lower-edge grab band contains ``pos``."""
-        band = _EVENT_RESIZE_BAND * self._paint_scale()
-        for i in reversed(range(len(self._events))):
-            b = self._event_box_rect(i)
-            if b.left() <= pos.x() <= b.right() \
-                    and abs(pos.y() - b.bottom()) <= band:
-                return i
-        return None
-
-    def _box_overlaps(self, index: int, rect: QRectF) -> bool:
-        """Whether ``rect`` overlaps another (non-empty) event box on this tile."""
-        for j in range(len(self._events)):
-            if j == index or not self._events[j].key:
-                continue
-            if self._event_box_rect(j).intersects(rect):
-                return True
-        return False
-
-    def _resize_event_to(self, pos) -> None:
-        """Set the resized event's font size from the vertical drag (up=bigger),
-        clamped to the min/max — but never grow it into another box."""
-        i = self._resize_index
-        if i is None or not 0 <= i < len(self._events):
-            return
-        delta = (self._resize_start_y - pos.y()) * _EVENT_RESIZE_SENS
-        size = max(_EVENT_MIN_PX,
-                   min(_EVENT_MAX_PX, self._resize_start_size + delta))
-        current = self._events[i].size
-        if size == current:
-            return
-        self._events[i].size = size
-        if size > current and self._placement_blocked(i, self._event_box_rect(i)):
-            self._events[i].size = current   # growth would collide: hold
-            return
-        self._resize_changed = True
-        self.update()
 
     def _drag_event_to(self, pos) -> None:
         """Snap the dragged event to the placement-grid cell under ``pos``. The
@@ -1311,9 +1225,6 @@ class DayCell(QPushButton):
             self.setCursor(Qt.PointingHandCursor if over_num else Qt.ArrowCursor)
             return
         pos = event.position()
-        if self._resize_index is not None and (event.buttons() & Qt.LeftButton):
-            self._resize_event_to(pos)
-            return
         if self._drag_index is not None and (event.buttons() & Qt.LeftButton):
             self._drag_event_to(pos)
             return
@@ -1361,12 +1272,7 @@ class DayCell(QPushButton):
         elif self._weather_hover is not None:
             self._weather_hover = None
             self.update()
-        # A vertical-resize cursor over an event box's lower edge (not while the
-        # band is open over the canvas).
-        if not asc_open and self._event_resize_at(pos) is not None:
-            self.setCursor(Qt.SizeVerCursor)
-        else:
-            self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.PointingHandCursor)
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event) -> None:

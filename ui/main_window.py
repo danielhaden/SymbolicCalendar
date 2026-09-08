@@ -259,11 +259,6 @@ class MainWindow(QMainWindow):
         self._bar_thickness = max(
             BAR_THICKNESS_MIN, min(BAR_THICKNESS_MAX, self._bar_thickness))
         self._month_view.set_bar_thickness(self._bar_thickness)
-        # The top-right moon-phase glyph is a persisted preference, hidden by
-        # default (the daylight/moon bars already convey the phase).
-        self._show_moon_phase = self._settings.value(
-            "view/show_moon_phase", False, type=bool)
-        self._month_view.set_moon_glyph_visible(self._show_moon_phase)
         # Weather curves: a persisted preference, off by default (enabling it
         # makes the app's first content network call, so it stays opt-in).
         self._show_weather = self._settings.value(
@@ -463,11 +458,6 @@ class MainWindow(QMainWindow):
             # Revert the live preview to the value in effect before opening.
             self._month_view.set_bar_thickness(original)
 
-    def _on_toggle_moon_phase(self, visible: bool) -> None:
-        self._show_moon_phase = visible
-        self._settings.setValue("view/show_moon_phase", visible)
-        self._month_view.set_moon_glyph_visible(visible)
-
     def _on_toggle_weather(self, visible: bool) -> None:
         self._show_weather = visible
         self._settings.setValue("view/show_weather", visible)
@@ -537,11 +527,6 @@ class MainWindow(QMainWindow):
         moonbar_action.setCheckable(True)
         moonbar_action.setChecked(True)
         moonbar_action.toggled.connect(self._month_view.set_moon_bar_visible)
-
-        moonphase_action = view_menu.addAction("Show Moon Phase")
-        moonphase_action.setCheckable(True)
-        moonphase_action.setChecked(self._show_moon_phase)  # persisted; off by default
-        moonphase_action.toggled.connect(self._on_toggle_moon_phase)
 
         ascendant_action = view_menu.addAction("Show Ascendant")
         ascendant_action.setCheckable(True)

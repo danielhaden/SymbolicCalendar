@@ -43,7 +43,6 @@ from model import (
     current_location,
     daylight,
     ingresses_on,
-    moon_phase,
     moon_void_begins,
     moonlight,
     planets_in_signs,
@@ -849,12 +848,6 @@ class MonthView(QWidget):
             c.set_moon_bar_visible(visible)
         self._expanded.set_moon_bar_visible(visible)
 
-    def set_moon_glyph_visible(self, visible: bool) -> None:
-        """Show/hide the top-right moon-phase glyph across the month (View menu)."""
-        for c in self._cells:
-            c.set_moon_glyph_visible(visible)
-        self._expanded.set_moon_glyph_visible(visible)
-
     def set_ascendant_visible(self, visible: bool) -> None:
         """Show/hide the rising-sign band across the whole month (View menu)."""
         for c in self._cells:
@@ -1109,7 +1102,6 @@ class MonthView(QWidget):
                     day,
                     in_month=self._model.is_in_displayed_month(day),
                     is_today=(day == today),
-                    lunation=moon_phase(day),
                     void_begins=moon_void_begins(day, location),
                     daylight=daylight(day),
                     moonlight=moonlight(day),

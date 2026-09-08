@@ -1,15 +1,14 @@
 """The day tile: a single self-painting calendar cell.
 
 ``DayCell`` is a custom-painted ``QPushButton`` — one per day in the month
-grid. It owns all tile rendering (date number, moon-phase glyph, daylight/moon
-bars, weather curves, event boxes, the ascendant band) and the per-tile
+grid. It owns all tile rendering (date number, daylight/moon bars, weather
+curves, event boxes, the ascendant band) and the per-tile
 geometry that positions them. ``MonthView`` (month_view.py) composes 28-42 (4-6 
 weeks depending on the month) of these; shared symbol tables live in symbols.py.
 """
 
 from __future__ import annotations
 
-import math
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -40,7 +39,6 @@ from model import (
     Daylight,
     DayWeather,
     Occurrence,
-    Lunation,
     Moonlight,
     Weather,
     ascendant,
@@ -104,9 +102,6 @@ def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
         round(c1.blue() + (c2.blue() - c1.blue()) * t),
     )
 
-# Moon-phase glyph geometry (top-right corner of a tile).
-_MOON_RADIUS = 4.5
-
 # Event canvas geometry (the tile-body box that holds event glyphs).
 _CANVAS_TOP = 30.0      # below the number / moon header
 _CANVAS_MARGIN = 4.0    # gap from the tile's right / bottom edges
@@ -116,33 +111,6 @@ _EVENT_ROW_H = 24.0     # height of one event row
 _EVENT_TEXT_SIZE = 14.0  # event-text size in the expanded list
 # Event key glyphs on the grid tile (one per placement-grid cell).
 _EVENT_TEXT_PX = 9.5     # default unscaled pixel size of the label text
-
-def _moon_lit_path(cx: float, cy: float, r: float,
-                   illumination: float, waxing: bool) -> QPainterPath:
-    """Path enclosing the moon's lit region for the given phase.
-
-    The boundary is the bright limb (a semicircle on the lit side) joined to
-    the terminator (a half-ellipse whose horizontal radius is ``r*(1-2*mu)``).
-    ``mu`` is the illuminated fraction: 0 -> sliver, 0.5 -> quarter (straight
-    terminator), 1 -> full disc. Waxing moons are lit on the right, waning on
-    the left.
-    """
-    mu = max(0.0, min(1.0, illumination))
-    rx = r * (1.0 - 2.0 * mu)
-    side = 1.0 if waxing else -1.0
-    steps = 24
-    path = QPainterPath()
-    # Bright limb: top -> bottom along the lit side.
-    for i in range(steps + 1):
-        ang = math.pi * i / steps
-        pt = QPointF(cx + side * r * math.sin(ang), cy - r * math.cos(ang))
-        path.moveTo(pt) if i == 0 else path.lineTo(pt)
-    # Terminator: bottom -> top, width set by the phase.
-    for i in range(steps + 1):
-        ang = math.pi * (steps - i) / steps
-        path.lineTo(QPointF(cx + side * rx * math.sin(ang), cy - r * math.cos(ang)))
-    path.closeSubpath()
-    return path
 
 
 class DayCell(QPushButton):
@@ -204,7 +172,6 @@ class DayCell(QPushButton):
         self._is_hovered_bar = False   # this cell's bar is the one hovered
         self._hover_progress = 0.0     # fade amount for the overlay
         self._show_daylight = True     # View menu toggle
-        self._show_moon_glyph = True   # top-right moon-phase glyph (View menu)
         self._show_gridlines = False   # faint 08:00/16:00 verticals (View menu)
         # Standalone (expanded) tile: an enlarged copy of a grid tile that fills
         # the month view; its day number collapses it back.
@@ -215,7 +182,6 @@ class DayCell(QPushButton):
         self._fill_bg = False
         self._scale_override: float | None = None
         self._theme: Theme | None = None
-        self._lunation: Lunation | None = None
         self._void_begin: str | None = None      # 'HH:MM' the void begins
         self._daylight: Daylight | None = None
         # Moon-rise/set bar: the Moon's above-horizon span(s) for the day; a
@@ -318,7 +284,6 @@ class DayCell(QPushButton):
         *,
         in_month: bool,
         is_today: bool,
-        lunation: Lunation | None,
         void_begins: str | None,
         daylight: Daylight | None,
         moonlight: Moonlight | None,
@@ -333,7 +298,6 @@ class DayCell(QPushButton):
         self._in_month = in_month
         self._today = is_today
         self._weekend = day.weekday() >= 5
-        self._lunation = lunation
         self._void_begin = void_begins
         self._daylight = daylight
         self._moonlight = moonlight
@@ -1093,11 +1057,6 @@ class DayCell(QPushButton):
             self._show_moon_bar = visible
             self.update()
 
-    def set_moon_glyph_visible(self, visible: bool) -> None:
-        if visible != self._show_moon_glyph:
-            self._show_moon_glyph = visible
-            self.update()
-
     def set_ascendant_visible(self, visible: bool) -> None:
         if visible != self._show_ascendant:
             self._show_ascendant = visible
@@ -1379,11 +1338,9 @@ class DayCell(QPushButton):
         self._in_month = other._in_month
         self._today = other._today
         self._weekend = other._weekend
-        self._lunation = other._lunation
         self._void_begin = other._void_begin
         self._daylight = other._daylight
         self._show_daylight = other._show_daylight
-        self._show_moon_glyph = other._show_moon_glyph
         self._show_gridlines = other._show_gridlines
         self._moonlight = other._moonlight
         self._show_moon_bar = other._show_moon_bar
@@ -1746,33 +1703,6 @@ class DayCell(QPushButton):
         # bottom edge (beneath the daylight/moon strip). Drawn after the event
         # boxes so its hover-expansion overlays them cleanly. ---
         self._draw_ascendant(p, t)
-
-        # --- Top-right glyph: the moon-phase shape (crescent/quarter/gibbous/
-        # full). Moon sign-ingresses now live in the ascendant band. ---
-        full_alpha = 110 if not self._in_month else 255
-        base = QColor(t.MOON)
-        base.setAlpha(full_alpha)
-        cx, cy, r = w - 11.0 * s, 17.0 * s, _MOON_RADIUS * s
-
-        if not self._standalone and self._show_moon_glyph \
-                and self._lunation is not None:
-            # Faint full-disc outline marks the unlit limb (visible at new moon).
-            outline = QColor(t.MOON)
-            outline.setAlpha(int(full_alpha * 0.45))
-            pen = QPen(outline)
-            pen.setWidthF(max(1.0, s))
-            p.setPen(pen)
-            p.setBrush(Qt.NoBrush)
-            p.drawEllipse(QPointF(cx, cy), r, r)
-
-            # Fill the lit region.
-            p.setPen(Qt.NoPen)
-            p.setBrush(base)
-            p.drawPath(_moon_lit_path(
-                cx, cy, r,
-                self._lunation.display_illumination, self._lunation.is_waxing,
-            ))
-
 
         # --- Date number, top-left. Greyscale only: emphasis comes from
         # styling, not color. Today and the hovered tile are bold (but the same

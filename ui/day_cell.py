@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
 )
 
 from model import (
+    GRID_COLS,
+    GRID_ROWS,
     Ascendant,
     Daylight,
     DayWeather,
@@ -88,10 +90,9 @@ _WX_TEMP_ALPHA = 145        # temperature line opacity over TEXT (lower = greyer
 _WX_PRESS_ALPHA = 100       # pressure line opacity over TEXT
 _WX_DOT_ALPHA = 130         # pressure high/low dots (a touch above the line)
 
-# Per-tile placement grid (for snapping events): 9 columns x 6 rows. Invisible
-# until hovered, when the cell under the cursor fades to a faint grey.
-_TILE_GRID_COLS = 9
-_TILE_GRID_ROWS = 6
+# Per-tile placement grid (for snapping events): GRID_COLS x GRID_ROWS, the
+# dimensions owned by the model (imported above). Invisible until hovered, when
+# the cell under the cursor fades to a faint grey.
 _TILE_GRID_ALPHA = 30       # hovered-cell fill opacity over TEXT (very light)
 
 def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
@@ -597,8 +598,8 @@ class DayCell(QPushButton):
     # -- placement grid (9x6) hover --------------------------------------
     def _grid_cell_rect(self, col: int, row: int) -> QRectF:
         """The rect of a placement-grid cell (in tile coords)."""
-        cw = self.width() / _TILE_GRID_COLS
-        ch = self.height() / _TILE_GRID_ROWS
+        cw = self.width() / GRID_COLS
+        ch = self.height() / GRID_ROWS
         return QRectF(col * cw, row * ch, cw, ch)
 
     def _set_grid_cell(self, cell) -> None:
@@ -629,8 +630,8 @@ class DayCell(QPushButton):
         """Fill the hovered 9x6 cell with a very light grey (faded by hover)."""
         if self._grid_cell is None or self._grid_progress <= 0.0:
             return
-        cw = self.width() / _TILE_GRID_COLS
-        ch = self.height() / _TILE_GRID_ROWS
+        cw = self.width() / GRID_COLS
+        ch = self.height() / GRID_ROWS
         col, row = self._grid_cell
         fill = QColor(t.TEXT)
         fill.setAlpha(round(_TILE_GRID_ALPHA * self._grid_progress))
@@ -1007,8 +1008,8 @@ class DayCell(QPushButton):
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0:
             return None
-        col = min(_TILE_GRID_COLS - 1, max(0, int(pos.x() / (w / _TILE_GRID_COLS))))
-        row = min(_TILE_GRID_ROWS - 1, max(0, int(pos.y() / (h / _TILE_GRID_ROWS))))
+        col = min(GRID_COLS - 1, max(0, int(pos.x() / (w / GRID_COLS))))
+        row = min(GRID_ROWS - 1, max(0, int(pos.y() / (h / GRID_ROWS))))
         return (col, row) if cell_is_valid(col, row) else None
 
     def _event_box_at(self, pos) -> int | None:

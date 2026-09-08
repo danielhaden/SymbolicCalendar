@@ -40,9 +40,12 @@ _FREQS = ("daily", "weekly", "monthly", "yearly")
 # overlaps the daylight/moon bars and the ascendant band, so events occupy the
 # body rows only. This is the single source of truth for the grid dimensions;
 # the UI imports these to draw and snap.
-GRID_COLS = 9
-GRID_ROWS = 6
-_EVENT_ROW_MAX = GRID_ROWS - 2          # 4 (row 5 reserved for band/bars)
+GRID_COLS = 12
+GRID_ROWS = 8
+# Bottom rows reserved for the daylight/moon bars + ascendant band, whose fixed
+# pixel height spans about two rows at this grid size.
+_BAND_ROWS = 2
+_EVENT_ROW_MAX = GRID_ROWS - 1 - _BAND_ROWS   # 5 (rows 6-7 reserved)
 _DATE_CELL = (0, 0)                     # top-left corner: the date number
 _DEFAULT_CELL = (1, 0)                  # (col, row) fallback placement
 

@@ -42,20 +42,22 @@ _FREQS = ("daily", "weekly", "monthly", "yearly")
 # the UI imports these to draw and snap.
 GRID_COLS = 9
 GRID_ROWS = 6
-_EVENT_ROW_MIN = 1
 _EVENT_ROW_MAX = GRID_ROWS - 2          # 4 (row 5 reserved for band/bars)
-_DEFAULT_CELL = (0, _EVENT_ROW_MIN)     # (col, row) fallback placement
+_DATE_CELL = (0, 0)                     # top-left corner: the date number
+_DEFAULT_CELL = (1, 0)                  # (col, row) fallback placement
 
 
 def _valid_cells() -> list[tuple[int, int]]:
     """Every cell an event may occupy, in row-major order."""
-    return [(c, r) for r in range(_EVENT_ROW_MIN, _EVENT_ROW_MAX + 1)
-            for c in range(GRID_COLS)]
+    return [(c, r) for r in range(_EVENT_ROW_MAX + 1)
+            for c in range(GRID_COLS) if (c, r) != _DATE_CELL]
 
 
 def cell_is_valid(col: int, row: int) -> bool:
-    """True if (col, row) is a body cell an event may occupy."""
-    return 0 <= col < GRID_COLS and _EVENT_ROW_MIN <= row <= _EVENT_ROW_MAX
+    """True if (col, row) is a cell an event may occupy: any grid cell except
+    the date corner (top-left) and the band/bar row (the last)."""
+    return (0 <= col < GRID_COLS and 0 <= row <= _EVENT_ROW_MAX
+            and (col, row) != _DATE_CELL)
 
 
 def _clamp_cell(col: object, row: object) -> tuple[int, int]:
@@ -65,8 +67,8 @@ def _clamp_cell(col: object, row: object) -> tuple[int, int]:
     except (TypeError, ValueError):
         return _DEFAULT_CELL
     c = max(0, min(GRID_COLS - 1, c))
-    r = max(_EVENT_ROW_MIN, min(_EVENT_ROW_MAX, r))
-    return c, r
+    r = max(0, min(_EVENT_ROW_MAX, r))
+    return _DEFAULT_CELL if (c, r) == _DATE_CELL else (c, r)
 
 
 def _parse_date(value: object) -> date | None:

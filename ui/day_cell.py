@@ -601,22 +601,6 @@ class DayCell(QPushButton):
         ch = self.height() / _TILE_GRID_ROWS
         return QRectF(col * cw, row * ch, cw, ch)
 
-    def _grid_reserved(self, col: int, row: int) -> bool:
-        """Cells that can't take an event; the date sits in the top-left one."""
-        return (col, row) == (0, 0)
-
-    def _grid_cell_at(self, pos) -> tuple[int, int] | None:
-        """The (col, row) of the 9x6 placement grid under ``pos``, or None for a
-        reserved cell (so it neither highlights nor accepts events)."""
-        w, h = self.width(), self.height()
-        if w <= 0 or h <= 0:
-            return None
-        col = min(_TILE_GRID_COLS - 1, max(0, int(pos.x() / (w / _TILE_GRID_COLS))))
-        row = min(_TILE_GRID_ROWS - 1, max(0, int(pos.y() / (h / _TILE_GRID_ROWS))))
-        if self._grid_reserved(col, row):
-            return None
-        return col, row
-
     def _set_grid_cell(self, cell) -> None:
         """Track the hovered grid cell; fade the highlight in on hover, out on
         leave (the last cell is kept so it can fade out)."""
@@ -1187,7 +1171,7 @@ class DayCell(QPushButton):
         if self._drag_index is not None and (event.buttons() & Qt.LeftButton):
             self._drag_event_to(pos)
             return
-        self._set_grid_cell(self._grid_cell_at(pos))  # placement-grid hover
+        self._set_grid_cell(self._grid_cell_under(pos))  # placement-grid hover
         # Ascendant band: hovering its strip grows it open. Hysteresis — open
         # when over the collapsed strip, stay open while over the expanded band.
         if self._asc_can_expand():

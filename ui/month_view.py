@@ -883,20 +883,28 @@ class MonthView(QWidget):
         days = [c._date for c in self._cells if c._date is not None]
         return (min(days), max(days)) if days else None
 
-    def _weather_scale(self, days) -> tuple[float, float, float, float] | None:
-        """A shared y-scale (temp_lo, temp_hi, press_lo, press_hi) across the
-        visible month, padded, so day-to-day curve heights are comparable."""
+    def _weather_scale(self, days):
+        """A shared y-scale (temp_lo, temp_hi, press_lo, press_hi, hum_lo,
+        hum_hi) across the visible month, padded, so day-to-day curve heights
+        are comparable. Humidity falls back to 0-100 when no day has it yet."""
         temps: list[float] = []
         press: list[float] = []
+        hums: list[float] = []
         for dw in days:
             temps += [v for v in dw.temp_f if v is not None]
             press += [v for v in dw.pressure_hpa if v is not None]
+            hums += [v for v in dw.humidity_pct if v is not None]
         if not temps or not press:
             return None
         tpad = max(1.0, (max(temps) - min(temps)) * 0.08)
         ppad = max(0.5, (max(press) - min(press)) * 0.08)
+        if hums:
+            hpad = max(2.0, (max(hums) - min(hums)) * 0.08)
+            h_lo, h_hi = min(hums) - hpad, max(hums) + hpad
+        else:
+            h_lo, h_hi = 0.0, 100.0
         return (min(temps) - tpad, max(temps) + tpad,
-                min(press) - ppad, max(press) + ppad)
+                min(press) - ppad, max(press) + ppad, h_lo, h_hi)
 
     def _apply_weather(self) -> None:
         """Push cached weather (and the shared scale) onto each cell."""

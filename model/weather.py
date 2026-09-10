@@ -13,8 +13,9 @@ Source: Open-Meteo (free, no API key). Two endpoints cover the timeline:
   older history (it lags real time by ~5 days).
 
 Future days are intentionally not fetched (no forecast yet). Each day is stored
-as 24 hourly points of temperature (°F) and mean-sea-level pressure (hPa),
-local-hour aligned so the UI can plot them straight onto a tile's 24-hour axis.
+as 24 hourly points of temperature (°F), mean-sea-level pressure (hPa), and
+relative humidity (%), local-hour aligned so the UI can plot them straight onto
+a tile's 24-hour axis.
 
 Everything here is network-tolerant: a failed or offline fetch simply leaves the
 cache unchanged and returns whatever is already cached (possibly nothing).
@@ -34,7 +35,7 @@ from .updates import ssl_context
 
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 _ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
-_HOURLY = "temperature_2m,pressure_msl"
+_HOURLY = "temperature_2m,pressure_msl,relative_humidity_2m"
 _TIMEOUT = 8.0  # seconds; a background fetch should fail reasonably fast
 
 # Open-Meteo's forecast endpoint reaches back this many days; older dates come
@@ -74,6 +75,8 @@ class DayWeather:
     day: date
     temp_f: tuple[float | None, ...]        # hourly temperature, °F
     pressure_hpa: tuple[float | None, ...]  # hourly mean-sea-level pressure, hPa
+    humidity_pct: tuple[float | None, ...]  # hourly relative humidity, %; () for
+    #                                         a legacy row not yet refetched
     kind: str                               # "observed" (past) | "current" (today)
     fetched_at: str                         # ISO-8601 UTC timestamp of the fetch
 
@@ -100,6 +103,7 @@ class DayWeather:
         return {
             "temp_f": list(self.temp_f),
             "pressure_hpa": list(self.pressure_hpa),
+            "humidity_pct": list(self.humidity_pct),
             "kind": self.kind,
             "fetched_at": self.fetched_at,
         }
@@ -109,12 +113,16 @@ class DayWeather:
         try:
             temp = tuple(_as_float_or_none(v) for v in d.get("temp_f", []))
             press = tuple(_as_float_or_none(v) for v in d.get("pressure_hpa", []))
+            # Absent on legacy rows; () marks them for a humidity backfill.
+            hum = (tuple(_as_float_or_none(v) for v in d["humidity_pct"])
+                   if "humidity_pct" in d else ())
         except (TypeError, ValueError):
             return None
         if len(temp) != 24 or len(press) != 24:
             return None
         kind = "current" if d.get("kind") == "current" else "observed"
-        return DayWeather(day, temp, press, kind, str(d.get("fetched_at", "")))
+        return DayWeather(day, temp, press, hum, kind,
+                          str(d.get("fetched_at", "")))
 
 
 def _as_float_or_none(value: object) -> float | None:
@@ -241,6 +249,8 @@ class Weather:
         dw = self.get(day, location)
         if dw is None:
             return True
+        if len(dw.humidity_pct) != 24:
+            return True  # legacy row fetched before humidity: backfill once
         if day < today:
             return False  # a past day is an observation; it won't change
         if force_current:
@@ -249,21 +259,22 @@ class Weather:
         return _age(dw.fetched_at) > _CURRENT_TTL
 
     def _store(self, location: Location, day: date, temp: list[float | None],
-               press: list[float | None], kind: str) -> None:
+               press: list[float | None], hum: list[float | None],
+               kind: str) -> None:
         bucket = self._cache.setdefault(_loc_key(location), {})
         bucket[day.isoformat()] = DayWeather(
-            day, tuple(temp), tuple(press), kind, _now_iso())
+            day, tuple(temp), tuple(press), tuple(hum), kind, _now_iso())
 
     def _ingest(self, location: Location, data: dict, today: date) -> bool:
         """Parse an Open-Meteo response's hourly block into per-day rows."""
         by_day = _group_hourly(data)
         if not by_day:
             return False
-        for day, (temp, press) in by_day.items():
+        for day, (temp, press, hum) in by_day.items():
             if day > today:
                 continue  # ignore any future rows the endpoint returns
             kind = "current" if day == today else "observed"
-            self._store(location, day, temp, press, kind)
+            self._store(location, day, temp, press, hum, kind)
         return True
 
     def _fetch_forecast(self, location: Location, start: date, today: date,
@@ -305,16 +316,18 @@ class Weather:
 
 
 def _group_hourly(data: dict) -> dict[date, tuple[list[float | None],
+                                                  list[float | None],
                                                   list[float | None]]]:
-    """Turn Open-Meteo's flat hourly arrays into ``{date: (temp[24], press[24])}``
-    indexed by local hour."""
+    """Turn Open-Meteo's flat hourly arrays into
+    ``{date: (temp[24], press[24], humidity[24])}`` indexed by local hour."""
     hourly = data.get("hourly") if isinstance(data, dict) else None
     if not isinstance(hourly, dict):
         return {}
     times = hourly.get("time") or []
     temps = hourly.get("temperature_2m") or []
     press = hourly.get("pressure_msl") or []
-    out: dict[date, tuple[list[float | None], list[float | None]]] = {}
+    hums = hourly.get("relative_humidity_2m") or []
+    out: dict[date, tuple[list, list, list]] = {}
     for i, stamp in enumerate(times):
         try:
             ds, hs = str(stamp).split("T")
@@ -324,11 +337,14 @@ def _group_hourly(data: dict) -> dict[date, tuple[list[float | None],
             continue
         if not 0 <= hour < 24:
             continue
-        temp_arr, press_arr = out.setdefault(day, ([None] * 24, [None] * 24))
+        temp_arr, press_arr, hum_arr = out.setdefault(
+            day, ([None] * 24, [None] * 24, [None] * 24))
         if i < len(temps):
             temp_arr[hour] = _as_float_or_none(temps[i])
         if i < len(press):
             press_arr[hour] = _as_float_or_none(press[i])
+        if i < len(hums):
+            hum_arr[hour] = _as_float_or_none(hums[i])
     return out
 
 

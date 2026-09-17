@@ -1,9 +1,12 @@
-# GUI framework (Qt for Python)
-PySide6>=6.9
+# GUI framework (Qt for Python). Upper-bounded so a future major (Qt 7) can't
+# silently break a release build's fresh install.
+PySide6>=6.9,<7
 
 # Astrology/ephemeris data: moon phase, planet signs, retrograde state.
 # Pulls in pyswisseph, which is also used directly for civil-twilight times.
-kerykeion>=4.26
+# Capped below 6.x: kerykeion 6.0 (2026-09) is a breaking rewrite; the app
+# targets the 5.x line. Raise this deliberately after porting to 6.x.
+kerykeion>=4.26,<6
 
 # CA bundle for HTTPS verification of the GitHub update check. Bundled into the
 # packaged app so TLS works without relying on the build machine's system certs

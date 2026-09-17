@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
 )
 
 from model import (
+    GRID_COLS,
+    GRID_ROWS,
     Ascendant,
     Daylight,
     DayWeather,
@@ -84,14 +86,15 @@ _WX_BAND_H = 22.0            # unscaled height of the curve band
 _WX_BAND_GAP = 2.0          # gap above the bottom bar strip
 _WX_TEMP_WIDTH = 1.3        # temperature stroke width
 _WX_PRESS_WIDTH = 1.1       # pressure stroke width
+_WX_HUM_WIDTH = 1.1         # humidity stroke width (drawn dotted)
 _WX_TEMP_ALPHA = 145        # temperature line opacity over TEXT (lower = greyer)
 _WX_PRESS_ALPHA = 100       # pressure line opacity over TEXT
+_WX_HUM_ALPHA = 95          # humidity line opacity over TEXT
 _WX_DOT_ALPHA = 130         # pressure high/low dots (a touch above the line)
 
-# Per-tile placement grid (for snapping events): 9 columns x 6 rows. Invisible
-# until hovered, when the cell under the cursor fades to a faint grey.
-_TILE_GRID_COLS = 9
-_TILE_GRID_ROWS = 6
+# Per-tile placement grid (for snapping events): GRID_COLS x GRID_ROWS, the
+# dimensions owned by the model (imported above). Invisible until hovered, when
+# the cell under the cursor fades to a faint grey.
 _TILE_GRID_ALPHA = 30       # hovered-cell fill opacity over TEXT (very light)
 
 def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
@@ -253,7 +256,7 @@ class DayCell(QPushButton):
         # curve heights are comparable.
         self._show_weather = False
         self._weather: DayWeather | None = None
-        self._wx_scale: tuple[float, float, float, float] | None = None
+        self._wx_scale: tuple[float, ...] | None = None  # shared temp/press/hum
         self._weather_hover: QPointF | None = None  # cursor pos over the band
         # Placement grid: the 9x6 cell under the cursor, faded in on hover.
         self._grid_cell: tuple[int, int] | None = None
@@ -597,8 +600,8 @@ class DayCell(QPushButton):
     # -- placement grid (9x6) hover --------------------------------------
     def _grid_cell_rect(self, col: int, row: int) -> QRectF:
         """The rect of a placement-grid cell (in tile coords)."""
-        cw = self.width() / _TILE_GRID_COLS
-        ch = self.height() / _TILE_GRID_ROWS
+        cw = self.width() / GRID_COLS
+        ch = self.height() / GRID_ROWS
         return QRectF(col * cw, row * ch, cw, ch)
 
     def _set_grid_cell(self, cell) -> None:
@@ -629,8 +632,8 @@ class DayCell(QPushButton):
         """Fill the hovered 9x6 cell with a very light grey (faded by hover)."""
         if self._grid_cell is None or self._grid_progress <= 0.0:
             return
-        cw = self.width() / _TILE_GRID_COLS
-        ch = self.height() / _TILE_GRID_ROWS
+        cw = self.width() / GRID_COLS
+        ch = self.height() / GRID_ROWS
         col, row = self._grid_cell
         fill = QColor(t.TEXT)
         fill.setAlpha(round(_TILE_GRID_ALPHA * self._grid_progress))
@@ -1007,8 +1010,8 @@ class DayCell(QPushButton):
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0:
             return None
-        col = min(_TILE_GRID_COLS - 1, max(0, int(pos.x() / (w / _TILE_GRID_COLS))))
-        row = min(_TILE_GRID_ROWS - 1, max(0, int(pos.y() / (h / _TILE_GRID_ROWS))))
+        col = min(GRID_COLS - 1, max(0, int(pos.x() / (w / GRID_COLS))))
+        row = min(GRID_ROWS - 1, max(0, int(pos.y() / (h / GRID_ROWS))))
         return (col, row) if cell_is_valid(col, row) else None
 
     def _event_box_at(self, pos) -> int | None:
@@ -1405,9 +1408,9 @@ class DayCell(QPushButton):
         return segs
 
     def _draw_weather(self, p: QPainter, t: Theme) -> None:
-        """Temperature (solid) and pressure (dashed) intraday curves in the
-        lower band, with small T / P end labels. Greyscale; dimmed out-of-month.
-        Drawn behind the event glyphs so events stay legible on top."""
+        """Temperature (solid), pressure (dashed) and humidity (dotted) intraday
+        curves in the lower band. Greyscale; dimmed out-of-month. Drawn behind
+        the event glyphs so events stay legible on top."""
         band = self._weather_band()
         if band is None:
             return
@@ -1418,15 +1421,18 @@ class DayCell(QPushButton):
         cutoff = self._wx_cutoff_index()
         temp_series = self._wx_clip(dw.temp_f, cutoff)
         press_series = self._wx_clip(dw.pressure_hpa, cutoff)
+        hum_series = self._wx_clip(dw.humidity_pct, cutoff)
         temps = [v for v in temp_series if v is not None]
         press = [v for v in press_series if v is not None]
+        hums = [v for v in hum_series if v is not None]
         if not temps and not press:
             return
         if self._wx_scale is not None:
-            t_lo, t_hi, p_lo, p_hi = self._wx_scale
+            t_lo, t_hi, p_lo, p_hi, h_lo, h_hi = self._wx_scale
         else:  # no shared scale yet: autoscale to this day
             t_lo, t_hi = (min(temps), max(temps)) if temps else (0.0, 1.0)
             p_lo, p_hi = (min(press), max(press)) if press else (0.0, 1.0)
+            h_lo, h_hi = (min(hums), max(hums)) if hums else (0.0, 100.0)
 
         dim = 0.5 if not self._in_month else 1.0
         x0, x1, y_top, y_bot = band
@@ -1451,6 +1457,8 @@ class DayCell(QPushButton):
                _WX_TEMP_WIDTH, _WX_TEMP_ALPHA)
         stroke(self._wx_series_points(press_series, p_lo, p_hi, band),
                _WX_PRESS_WIDTH, _WX_PRESS_ALPHA, dash=[2.0, 2.0])
+        stroke(self._wx_series_points(hum_series, h_lo, h_hi, band),
+               _WX_HUM_WIDTH, _WX_HUM_ALPHA, dash=[0.5, 3.0])
         # Small dots at the highest and lowest pressure so far (no text — the
         # hover scrubber surfaces the values).
         pvals = [(i, v) for i, v in enumerate(press_series) if v is not None]
@@ -1468,7 +1476,8 @@ class DayCell(QPushButton):
         p.restore()
 
         if self._weather_hover is not None:
-            self._draw_weather_scrub(p, t, band, (t_lo, t_hi, p_lo, p_hi), cutoff)
+            self._draw_weather_scrub(
+                p, t, band, (t_lo, t_hi, p_lo, p_hi, h_lo, h_hi), cutoff)
 
     def _draw_weather_scrub(self, p: QPainter, t: Theme,
                             band: tuple[float, float, float, float],
@@ -1482,7 +1491,7 @@ class DayCell(QPushButton):
         if pos is None:
             return
         x0, x1, y_top, y_bot = band
-        t_lo, t_hi, p_lo, p_hi = scale
+        t_lo, t_hi, p_lo, p_hi, h_lo, h_hi = scale
         dw = self._weather
         s = self._paint_scale()
         n = len(dw.temp_f) or 1
@@ -1507,6 +1516,10 @@ class DayCell(QPushButton):
         py = y_of(dw.pressure_hpa[i], p_lo, p_hi)
         if py is not None and pv_inhg is not None:
             cand.append((py, f"{pv_inhg:.2f}″"))
+        hv = dw.humidity_pct[i] if i < len(dw.humidity_pct) else None
+        hy = y_of(hv, h_lo, h_hi)
+        if hy is not None:
+            cand.append((hy, f"{hv:.0f}%"))
         if not cand:
             return
         cy, text = min(cand, key=lambda c: abs(c[0] - pos.y()))
